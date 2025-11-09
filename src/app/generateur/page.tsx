@@ -45,14 +45,28 @@ type StepGroup = {
   } | null;
 };
 
+// == Base URL de l'API ==
+const API_BASE = process.env.NEXT_PUBLIC_INTERNAL_API || "http://localhost:8001";
+const buildUrl = (path: string, params?: URLSearchParams | Record<string, string>) => {
+  const url = new URL(path, API_BASE);
+  if (params instanceof URLSearchParams) {
+    // si tu passes déjà un URLSearchParams
+    params.forEach((v, k) => url.searchParams.set(k, v));
+  } else if (params) {
+    // si tu passes un objet { k: v }
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  }
+  return url.toString();
+};
+
+
 /* =========================
    Backend helpers
    ========================= */
 
 async function fetchLookup(np: string, ns: string, em: string) {
-  const params = new URLSearchParams({ np: np || "", ns: ns || "", em: em || "" });
   try {
-    const res = await fetch(`http://localhost:8001/people/lookup?${params.toString()}`);
+    const res = await fetch(buildUrl("/people/lookup", { np: np || "", ns: ns || "", em: em || "" }));
     if (!res.ok) return { candidates: [], error: "bad_status" };
     const data = await res.json();
     return { candidates: data.candidates || [], error: null };
@@ -62,10 +76,12 @@ async function fetchLookup(np: string, ns: string, em: string) {
   }
 }
 
+
 async function fetchContacts(q: string) {
   if (q.trim().length < 2) return [];
   try {
-    const res = await fetch(`http://localhost:8001/contacts/search?q=${encodeURIComponent(q)}`);
+    const params = new URLSearchParams({ q });
+    const res = await fetch(buildUrl("/contacts/search", params));
     if (!res.ok) return [];
     const data = await res.json();
     return data.results || [];
@@ -77,7 +93,7 @@ async function fetchContacts(q: string) {
 
 async function fetchProducts() {
   try {
-    const res = await fetch("http://localhost:8001/products");
+    const res = await fetch(buildUrl("/products"));
     if (!res.ok) return [];
     const data = await res.json();
     return data as ProductApi[];
@@ -91,7 +107,7 @@ async function fetchSteps(prodCode: string, sheetName: string) {
   if (!prodCode || !sheetName) return { groups: [], error: null };
   const params = new URLSearchParams({ produit: prodCode, sheet: sheetName });
   try {
-    const res = await fetch(`http://localhost:8001/steps?${params.toString()}`);
+    const res = await fetch(buildUrl("/steps", params));
     if (!res.ok) return { groups: [], error: "bad_status" };
     const data = await res.json();
     return { groups: (data.groups || []) as StepGroup[], error: data.error || null };
@@ -100,6 +116,7 @@ async function fetchSteps(prodCode: string, sheetName: string) {
     return { groups: [], error: "network" };
   }
 }
+
 
 /* =========================
    UI helpers
@@ -387,33 +404,37 @@ export default function GenerateurPage() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
-  async function fetchExamplePhotoForGroup(prodCode: string, sheetName: string, groupLabel: string): Promise<boolean> {
-    const qs = new URLSearchParams({ produit: prodCode, sheet: sheetName, group: groupLabel });
-    try {
-      setPreviewLoading(true);
-      setPreviewError(null);
-      setPreviewUrl(null);
-      setPreviewTitle(groupLabel); // ✅ afficher le titre de l'étape UI ciblée
+  async function fetchExamplePhotoForGroup(
+  prodCode: string,
+  sheetName: string,
+  groupLabel: string
+): Promise<boolean> {
+  const qs = new URLSearchParams({ produit: prodCode, sheet: sheetName, group: groupLabel });
+  try {
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setPreviewUrl(null);
+    setPreviewTitle(groupLabel);
 
-      const res = await fetch(`http://localhost:8001/example-photo?${qs.toString()}`);
-      const data = await res.json();
-      setPreviewLoading(false);
-      if (res.ok && data?.ok && data?.url) {
-        setPreviewUrl(data.url);
-        setPreviewError(null);
-        return true;
-      } else {
-        setPreviewUrl(null);
-        setPreviewError(data?.message || "Pas d’exemple photo disponible.");
-        return false;
-      }
-    } catch {
-      setPreviewLoading(false);
+    const res = await fetch(buildUrl("/example-photo", qs));
+    const data = await res.json();
+    setPreviewLoading(false);
+    if (res.ok && data?.ok && data?.url) {
+      setPreviewUrl(data.url);
+      setPreviewError(null);
+      return true;
+    } else {
       setPreviewUrl(null);
-      setPreviewError("Pas d’exemple photo disponible.");
+      setPreviewError(data?.message || "Pas d’exemple photo disponible.");
       return false;
     }
+  } catch {
+    setPreviewLoading(false);
+    setPreviewUrl(null);
+    setPreviewError("Pas d’exemple photo disponible.");
+    return false;
   }
+}
 
 
   function shuffleInPlace<T>(arr: T[]) {
