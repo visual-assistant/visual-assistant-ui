@@ -1375,7 +1375,7 @@ export default function SavSessionDetailPage() {
     }
   }, [author, detail, includeMap, effectiveSessionId, isMultiSessionChantier, isChantierMode, chantierMeta.chantier_id]);
 
-  const handlePreviewReport = useCallback(() => {
+  const handlePreviewReport = useCallback(async () => {
     // ✅ chantier-first : on preview le rapport chantier
     const chantierUrl = (chantier as any)?.publication?.report_public_url;
     const chantierSlug = (chantier as any)?.publication?.report_public_slug;
@@ -1389,7 +1389,64 @@ export default function SavSessionDetailPage() {
       return;
     }
 
-    // legacy session preview
+    // ✅ Preview avant publication (chantier):
+    // Si aucun lien n'existe encore, on le crée côté backend SANS notifier l'installateur.
+    if (isChantierMode && chantierMeta.chantier_id) {
+      try {
+        const resp = await fetch(
+          `${API_BASE}/chantiers/${encodeURIComponent(chantierMeta.chantier_id)}/preview`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ author }),
+          }
+        );
+
+        if (!resp.ok) {
+          const txt = await resp.text().catch(() => "");
+          throw new Error(txt || `Erreur preview (${resp.status})`);
+        }
+
+        const data = await resp.json().catch(() => ({} as any));
+        const url = (data as any)?.public_url || (data as any)?.report_public_url;
+
+        if (!url) {
+          throw new Error("Le backend n'a pas renvoyé de lien public.");
+        }
+
+        // cache local (optionnel)
+        setChantier((prev) => {
+          if (!prev) return prev;
+          const pub = (prev as any).publication || {};
+          return {
+            ...(prev as any),
+            publication: {
+              ...pub,
+              report_public_url: url,
+              report_public_slug: (data as any)?.public_slug || pub.report_public_slug,
+            },
+          } as any;
+        });
+
+        window.open(url, "_blank", "noopener,noreferrer");
+        setToast({
+          type: "success",
+          message: "Aperçu prêt (lien créé sans notification).",
+        });
+        return;
+      } catch (err) {
+        console.error(err);
+        setToast({
+          type: "error",
+          message:
+            (err as any)?.message ||
+            "Impossible de générer l’aperçu pour le moment.",
+        });
+        return;
+      }
+    }
+
+    // legacy session preview (existant)
     if (detail?.public_url) {
       window.open(detail.public_url, "_blank", "noopener,noreferrer");
       return;
@@ -1402,9 +1459,10 @@ export default function SavSessionDetailPage() {
 
     setToast({
       type: "error",
-      message: "Aucun lien public disponible. Publie une première fois pour générer le rapport.",
+      message:
+        "Aucun lien public disponible. Publie une première fois pour générer le rapport.",
     });
-  }, [detail, chantier]);
+  }, [detail, chantier, isChantierMode, chantierMeta.chantier_id, author]);
 
   const toggleNotePhoto = useCallback((pid: string) => {
     setNotePhotos((prev) => {
@@ -1434,7 +1492,7 @@ export default function SavSessionDetailPage() {
             <button
               type="button"
               onClick={handlePreviewReport}
-              className="inline-flex items-center justify-center rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs hover:bg-neutral-50"
+              className="inline-flex items-center justify-center gap-1 rounded-full border border-neutral-300 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-neutral-400 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Aperçu
             </button>
@@ -1558,19 +1616,19 @@ export default function SavSessionDetailPage() {
                         value={draftInstallerName}
                         onChange={(e) => setDraftInstallerName(e.target.value)}
                         placeholder="Nom"
-                        className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                        className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                       />
                       <input
                         value={draftInstallerCompany}
                         onChange={(e) => setDraftInstallerCompany(e.target.value)}
                         placeholder="Société"
-                        className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                        className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                       />
                       <input
                         value={draftInstallerPhone}
                         onChange={(e) => setDraftInstallerPhone(e.target.value)}
                         placeholder="+33…"
-                        className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                        className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                       />
 
                       <div className="pt-1">
@@ -1582,7 +1640,7 @@ export default function SavSessionDetailPage() {
                             value={crmQuery}
                             onChange={(e) => setCrmQuery(e.target.value)}
                             placeholder="Rechercher un contact…"
-                            className="mt-1 w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                            className="mt-1 w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                           />
 
                           {(crmLoading || crmResults.length > 0) && (
@@ -1667,7 +1725,7 @@ export default function SavSessionDetailPage() {
                           value={draftReferenceChantier}
                           onChange={(e) => setDraftReferenceChantier(e.target.value)}
                           placeholder="Ex : Dillabough"
-                          className="mt-1 w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                          className="mt-1 w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                         />
                       </div>
 
@@ -1678,7 +1736,7 @@ export default function SavSessionDetailPage() {
                         <select
                           value={draftProductCode}
                           onChange={(e) => setDraftProductCode(e.target.value)}
-                          className="mt-1 w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                          className="mt-1 w-full text-sm text-neutral-900 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                         >
                           <option value="">—</option>
                           {products.map((p) => (
@@ -1717,39 +1775,39 @@ export default function SavSessionDetailPage() {
               {/* META EDITABLE */}
               <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)] gap-4 items-start">
                 <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
                     Description installateur
                   </div>
                   <input
                     value={descriptionInstallateur}
                     onChange={(e) => setDescriptionInstallateur(e.target.value)}
                     placeholder="Ex : chaudière en défaut, bruit anormal…"
-                    className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                    className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                   />
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
                     Destinataire WhatsApp (modifiable)
                   </div>
                   <input
                     value={reportRecipient}
                     onChange={(e) => setReportRecipient(e.target.value)}
                     placeholder="+33…"
-                    className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                    className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                   />
                   <div className="text-[11px] text-neutral-400">Le numéro qui recevra le rapport.</div>
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
                     N° de série
                   </div>
                   <input
                     value={numeroSerie}
                     onChange={(e) => setNumeroSerie(e.target.value)}
                     placeholder="Optionnel"
-                    className="w-full text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                    className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                   />
                 </div>
               </div>
@@ -1877,7 +1935,7 @@ export default function SavSessionDetailPage() {
                   <div className="border border-neutral-200 rounded-xl p-3 bg-white">
                     <div className="flex items-center justify-between gap-2">
                       <div>
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
                           Réponse / Note SAV (output)
                         </div>
                         <div className="text-[11px] text-neutral-500">
@@ -1899,7 +1957,7 @@ export default function SavSessionDetailPage() {
                         value={noteText}
                         onChange={(e) => setNoteText(e.target.value)}
                         placeholder="Écris la recommandation SAV…"
-                        className="w-full min-h-[110px] text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                        className="w-full min-h-[110px] text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                       />
 
                       {/* Photo links selector */}
@@ -1932,7 +1990,7 @@ export default function SavSessionDetailPage() {
 
                       {/* Optional visuals */}
                       <div className="flex items-center justify-between gap-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
                           Visuels joints (optionnels)
                         </div>
 
@@ -2103,14 +2161,14 @@ export default function SavSessionDetailPage() {
 
                   {/* GLOBAL NOTE */}
                   <div className="border border-neutral-200 rounded-xl p-3 bg-white">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
                       Note générale SAV (optionnelle)
                     </div>
                     <textarea
                       value={globalSavNote}
                       onChange={(e) => setGlobalSavNote(e.target.value)}
                       placeholder="Synthèse globale, avertissements, points à surveiller…"
-                      className="mt-2 w-full min-h-[90px] text-sm border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                      className="mt-2 w-full min-h-[90px] text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
                     />
                   </div>
                 </div>

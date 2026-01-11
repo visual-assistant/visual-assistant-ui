@@ -152,6 +152,29 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   };
 }
 
+function TrashIcon({
+  className = "w-4 h-4",
+}: {
+  className?: string;
+}) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      className={className}
+      aria-hidden="true"
+    >
+      <path
+        d="M9 3h6m-9 4h12M10 7v13m4-13v13M7 7l1 15h8l1-15"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export default function SavSessionsListPage() {
   const [unattached, setUnattached] = useState<ChantierAggItem[]>([]);
   const [chantiers, setChantiers] = useState<ChantierAggItem[]>([]);
@@ -179,6 +202,10 @@ export default function SavSessionsListPage() {
   const [attachSelectedChantierId, setAttachSelectedChantierId] =
     useState<string>("");
   const [attachNewChantierId, setAttachNewChantierId] = useState<string>("");
+
+  // suppression
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // non-vu persistant : map group_key -> signature
   const [seenSig, setSeenSig] = useState<Record<string, string>>({});
@@ -256,7 +283,8 @@ export default function SavSessionsListPage() {
       // tri: plus récent en haut
       nextUnattached.sort(
         (a, b) =>
-          (b.updated_at || b.created_at || 0) - (a.updated_at || a.created_at || 0)
+          (b.updated_at || b.created_at || 0) -
+          (a.updated_at || a.created_at || 0)
       );
 
       // 2) Chantiers (JSON) -> projection
@@ -268,7 +296,8 @@ export default function SavSessionsListPage() {
       // tri: plus récent en haut
       nextChantiers.sort(
         (a, b) =>
-          (b.updated_at || b.created_at || 0) - (a.updated_at || a.created_at || 0)
+          (b.updated_at || b.created_at || 0) -
+          (a.updated_at || a.created_at || 0)
       );
 
       setUnattached(nextUnattached);
@@ -474,6 +503,99 @@ export default function SavSessionsListPage() {
     }
   };
 
+  const handleDeleteRow = async (row: ChantierAggItem, isUnattached: boolean) => {
+    setDeleteError(null);
+
+    if (deletingKey) return;
+
+    if (isUnattached) {
+      const sids = row.session_ids || [];
+      const count = sids.length || 0;
+
+      if (count === 0) {
+        setDeleteError("Impossible de supprimer: aucune session détectée.");
+        return;
+      }
+
+      const ok = window.confirm(
+        count === 1
+          ? "Supprimer cette session ? Cette action est irréversible."
+          : `Supprimer ces ${count} sessions ? Cette action est irréversible.`
+      );
+      if (!ok) return;
+
+      setDeletingKey(row.group_key);
+
+      try {
+        // Supprimer toutes les sessions du groupe (souvent 1)
+        for (const sid of sids) {
+          const res = await fetch(
+            buildUrl(`/sessions/${encodeURIComponent(sid)}`),
+            { method: "DELETE", cache: "no-store" }
+          );
+          if (!res.ok) {
+            const txt = await res.text().catch(() => "");
+            throw new Error(
+              txt && txt.length < 220
+                ? txt
+                : `Erreur suppression session ${sid}`
+            );
+          }
+        }
+
+        await fetchOverview();
+      } catch (e: any) {
+        console.error("delete session(s) error", e);
+        setDeleteError(
+          e?.message
+            ? `Suppression impossible: ${e.message}`
+            : "Suppression impossible."
+        );
+      } finally {
+        setDeletingKey(null);
+      }
+      return;
+    }
+
+    // Chantier
+    const chantierId = (row.chantier_id || "").trim();
+    if (!chantierId) {
+      setDeleteError("Impossible de supprimer: chantier_id manquant.");
+      return;
+    }
+
+    const ok = window.confirm(
+      "Supprimer ce chantier ?\n\nLes sessions liées seront détachées (elles resteront visibles dans 'Sessions non rattachées').\n\nCette action est irréversible."
+    );
+    if (!ok) return;
+
+    setDeletingKey(row.group_key);
+
+    try {
+      const res = await fetch(
+        buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`),
+        { method: "DELETE", cache: "no-store" }
+      );
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          txt && txt.length < 220 ? txt : "Erreur suppression chantier"
+        );
+      }
+
+      await fetchOverview();
+    } catch (e: any) {
+      console.error("delete chantier error", e);
+      setDeleteError(
+        e?.message
+          ? `Suppression impossible: ${e.message}`
+          : "Suppression impossible."
+      );
+    } finally {
+      setDeletingKey(null);
+    }
+  };
+
   const Table = ({
     rows,
     emptyLabel,
@@ -515,6 +637,9 @@ export default function SavSessionsListPage() {
 
               const sig = computeSig(c);
               const isUnseen = (seenSig[c.group_key] || "") !== sig;
+
+              const isUnattachedTable = showAttachForUnattached; // ici: table "Sessions non rattachées"
+              const isDeleting = deletingKey === c.group_key;
 
               return (
                 <tr
@@ -573,7 +698,9 @@ export default function SavSessionsListPage() {
                   </td>
 
                   <td className="py-2 px-2 align-top">
-                    <div className="text-xs text-neutral-700">{sidCount || 0}</div>
+                    <div className="text-xs text-neutral-700">
+                      {sidCount || 0}
+                    </div>
                   </td>
 
                   <td className="py-2 px-2 align-top">
@@ -594,10 +721,26 @@ export default function SavSessionsListPage() {
                         <button
                           onClick={() => openAttachModal(c)}
                           className="inline-flex items-center text-xs px-2 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-100 text-neutral-800"
+                          disabled={isDeleting}
                         >
                           Rattacher à un chantier
                         </button>
                       )}
+
+                      {/* SUPPRIMER (icône) */}
+                      <button
+                        title="Supprimer"
+                        onClick={() => handleDeleteRow(c, isUnattachedTable)}
+                        disabled={isDeleting}
+                        className={[
+                          "inline-flex items-center justify-center rounded-lg border px-2 py-1",
+                          "text-xs",
+                          "border-red-200 bg-white hover:bg-red-50 text-red-700",
+                          isDeleting ? "opacity-50 cursor-not-allowed" : "",
+                        ].join(" ")}
+                      >
+                        <TrashIcon className="w-4 h-4" />
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -675,7 +818,13 @@ export default function SavSessionsListPage() {
 
         {loading && <div className="text-sm text-neutral-500">Chargement…</div>}
 
-        {!loading && error && <div className="text-sm text-red-600">{error}</div>}
+        {!loading && error && (
+          <div className="text-sm text-red-600">{error}</div>
+        )}
+
+        {!loading && !error && deleteError && (
+          <div className="text-sm text-red-600">{deleteError}</div>
+        )}
 
         {!loading && !error && (
           <div className="flex flex-col gap-6">
