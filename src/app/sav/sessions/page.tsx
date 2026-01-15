@@ -152,11 +152,7 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   };
 }
 
-function TrashIcon({
-  className = "w-4 h-4",
-}: {
-  className?: string;
-}) {
+function TrashIcon({ className = "w-4 h-4" }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -189,6 +185,77 @@ export default function SavSessionsListPage() {
   // filtres
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
+
+  // -------------------------------------------------------------------
+  // ✅ AJOUT MVP: envoi template WhatsApp "request photos"
+  // -------------------------------------------------------------------
+  const [waPhone, setWaPhone] = useState<string>("");
+  const [waSending, setWaSending] = useState(false);
+  const [waMsg, setWaMsg] = useState<string | null>(null);
+
+  const toE164FR = (raw: string) => {
+    const v = String(raw || "").trim();
+    if (!v) return "";
+
+    // on enlève espaces / points / tirets / parenthèses
+    const cleaned = v.replace(/[ \.\-\(\)]/g, "");
+
+    // déjà en +...
+    if (cleaned.startsWith("+")) return cleaned;
+
+    // 06XXXXXXXX / 07XXXXXXXX -> +336XXXXXXXX
+    if (/^0[67]\d{8}$/.test(cleaned)) return `+33${cleaned.slice(1)}`;
+
+    // 33XXXXXXXXX -> +33...
+    if (/^33\d{9}$/.test(cleaned)) return `+${cleaned}`;
+
+    // fallback: on renvoie tel quel (l’API renverra une erreur si invalide)
+    return cleaned;
+  };
+
+  const sendWhatsAppTemplate = async () => {
+    setWaMsg(null);
+    const toNumber = toE164FR(waPhone);
+
+    if (!toNumber) {
+      setWaMsg("Veuillez saisir un numéro.");
+      return;
+    }
+    if (!toNumber.startsWith("+")) {
+      setWaMsg("Numéro invalide. Format attendu: 06… / 07… ou +33…");
+      return;
+    }
+
+    setWaSending(true);
+    try {
+      const res = await fetch(buildUrl("/actions/whatsapp/request-photos"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to_number: toNumber }),
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        setWaMsg(
+          txt && txt.length < 220
+            ? `Erreur envoi: ${txt}`
+            : "Erreur lors de l’envoi WhatsApp."
+        );
+        return;
+      }
+
+      setWaMsg("✅ Template WhatsApp envoyé.");
+      // optionnel: reset
+      // setWaPhone("");
+    } catch (e) {
+      console.error("sendWhatsAppTemplate error", e);
+      setWaMsg("Erreur réseau lors de l’envoi WhatsApp.");
+    } finally {
+      setWaSending(false);
+    }
+  };
+  // -------------------------------------------------------------------
 
   // modal rattachement
   const [attachOpen, setAttachOpen] = useState(false);
@@ -815,6 +882,45 @@ export default function SavSessionsListPage() {
             </div>
           </div>
         </div>
+
+        {/* ------------------------------------------------------------------- */}
+        {/* ✅ AJOUT UI (déplacé): bloc "Envoyer WhatsApp" SOUS la ligne des filtres */}
+        {/* ------------------------------------------------------------------- */}
+        <div className="mt-1">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <div className="text-sm text-neutral-700 font-medium">
+              Envoyer WhatsApp
+              <span className="ml-2 text-xs text-neutral-500 font-normal">
+                (le client pourra envoyer les photos directement)
+              </span>
+            </div>
+
+            <div className="flex flex-col md:flex-row md:items-center gap-2">
+              <input
+                className="rounded-lg border border-neutral-300 px-3 py-1 text-sm bg-white w-full md:w-56"
+                placeholder="Téléphone (06… ou +33…)"
+                value={waPhone}
+                onChange={(e) => setWaPhone(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") sendWhatsAppTemplate();
+                }}
+              />
+              <button
+                className="text-sm px-3 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50 disabled:opacity-50"
+                onClick={sendWhatsAppTemplate}
+                disabled={waSending}
+                title="Envoie le template WhatsApp pour demander les photos"
+              >
+                {waSending ? "Envoi…" : "Envoyer WhatsApp"}
+              </button>
+
+              {waMsg && (
+                <div className="text-xs text-neutral-600 md:ml-2">{waMsg}</div>
+              )}
+            </div>
+          </div>
+        </div>
+        {/* ------------------------------------------------------------------- */}
 
         {loading && <div className="text-sm text-neutral-500">Chargement…</div>}
 
