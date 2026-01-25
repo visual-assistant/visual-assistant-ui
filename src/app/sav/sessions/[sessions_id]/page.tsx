@@ -171,6 +171,13 @@ function humanStatus(status?: string) {
   return status;
 }
 
+function humanChantierStatus(status?: string) {
+  const s = (status || "").toUpperCase();
+  if (!s) return "À traiter";
+  if (s.includes("RESOL")) return "Résolu";
+  return "À traiter";
+}
+
 function uid(prefix = "n") {
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
 }
@@ -777,6 +784,17 @@ export default function SavSessionDetailPage() {
     );
   }, [chantier, detail]);
 
+
+  const displayLastPublishedAt = useMemo(() => {
+    if (isChantierMode) return (chantier as any)?.publication?.last_published_at ?? null;
+    return detail?.last_published_at ?? null;
+  }, [isChantierMode, chantier, detail]);
+
+  const displayLastPublishedBy = useMemo(() => {
+    if (isChantierMode) return (chantier as any)?.publication?.last_published_by ?? null;
+    return detail?.last_published_by ?? null;
+  }, [isChantierMode, chantier, detail]);
+
   const startEditContext = useCallback(() => {
     setDraftInstallerName(displayInstaller.nom || "");
     setDraftInstallerCompany(displayInstaller.societe || "");
@@ -1257,14 +1275,12 @@ export default function SavSessionDetailPage() {
               last_published_at: data?.last_published_at || prev?.publication?.last_published_at,
               last_published_by: data?.last_published_by || prev?.publication?.last_published_by,
             },
-            status: data?.status || prev?.status,
             updated_at: data?.updated_at || prev?.updated_at,
           };
           return prev ? deepMerge(prev as any, pubPatch) : (pubPatch as any);
         });
 
         // (Optionnel) tu peux aussi mettre un mini patch sur `detail` si tu veux refléter "Publié" dans le badge status
-        setDetail((prev) => (prev ? { ...prev, status: "PUBLIÉ" } : prev));
 
         // Notify WhatsApp (best-effort)
         try {
@@ -1473,6 +1489,39 @@ export default function SavSessionDetailPage() {
     });
   }, []);
 
+
+const handleChantierStatusChange = useCallback(
+  async (nextStatus: "A_TRAITER" | "RESOLU") => {
+    if (!isChantierMode || !chantierMeta.chantier_id) return;
+
+    try {
+      const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantierMeta.chantier_id)}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `Erreur patch statut (${res.status})`);
+      }
+
+      setChantier((prev) => (prev ? { ...(prev as any), status: nextStatus } : prev));
+      setToast({
+        type: "success",
+        message: `Statut mis à jour : ${nextStatus === "RESOLU" ? "Résolu" : "À traiter"}.`,
+      });
+    } catch (err) {
+      console.error(err);
+      setToast({
+        type: "error",
+        message: (err as any)?.message || "Impossible de mettre à jour le statut.",
+      });
+    }
+  },
+  [isChantierMode, chantierMeta.chantier_id]
+);
+
   return (
     <main className="min-h-screen bg-neutral-100">
       {/* Top header */}
@@ -1486,8 +1535,19 @@ export default function SavSessionDetailPage() {
           <div className="flex items-center gap-3 text-xs">
             <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-emerald-700 border border-emerald-100">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              {humanStatus(detail?.status)}
+              {isChantierMode ? humanChantierStatus((chantier as any)?.status) : humanStatus(detail?.status)}
             </span>
+
+{isChantierMode && chantierMeta.chantier_id && (
+  <select
+    value={(((chantier as any)?.status || "A_TRAITER") as string).toUpperCase().includes("RESOL") ? "RESOLU" : "A_TRAITER"}
+    onChange={(e) => handleChantierStatusChange(e.target.value as any)}
+    className="rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-xs text-neutral-800 shadow-sm hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-neutral-400 focus:ring-offset-2"
+  >
+    <option value="A_TRAITER">À traiter</option>
+    <option value="RESOLU">Résolu</option>
+  </select>
+)}
 
             <button
               type="button"
@@ -1763,10 +1823,10 @@ export default function SavSessionDetailPage() {
                   </div>
                   <div className="text-neutral-700 text-xs">
                     <span className="font-medium">Dernière :</span>{" "}
-                    {detail.last_published_at ? formatTs(detail.last_published_at) : "—"}
+                    {displayLastPublishedAt ? formatTs(displayLastPublishedAt as any) : "—"}
                   </div>
                   <div className="text-neutral-700 text-xs">
-                    <span className="font-medium">Par :</span> {detail.last_published_by || "—"}
+                    <span className="font-medium">Par :</span> {(displayLastPublishedBy as any) || "—"}
                   </div>
                   <div className="text-neutral-500 text-[11px]">Photos reçues : {photos.length}</div>
                 </div>

@@ -27,6 +27,9 @@ type ChantierAggItem = {
   group_key: string;
   chantier_id?: string | null;
 
+  // Affichage liste: nom installateur (context.societe / context.installateur.company)
+  installateur?: string | null;
+
   status?: string;
   type?: string;
 
@@ -62,9 +65,14 @@ function formatTs(ts?: number | null) {
 
 function statusLabel(st?: string) {
   const s = (st || "").toUpperCase();
+  // Nouveau modèle
   if (s === "A_TRAITER") return "À traiter";
+  if (s === "RESOLU") return "Résolu";
+
+  // Legacy / compat
   if (s === "PUBLIE") return "Publié";
   if (st === "Publié") return "Publié";
+
   if (st === "À revoir") return "À revoir";
   if (st === "Nouveau") return "Nouveau";
   return st || "—";
@@ -72,13 +80,27 @@ function statusLabel(st?: string) {
 
 function statusPillClass(st?: string) {
   const s = (st || "").toUpperCase();
-  if (s === "PUBLIE" || st === "Publié")
-    return "bg-emerald-100 text-emerald-700";
-  if (s === "A_TRAITER" || st === "Nouveau")
-    return "bg-neutral-100 text-neutral-700";
+  if (s === "RESOLU") return "bg-emerald-100 text-emerald-700";
+  // legacy
+  if (s === "PUBLIE" || st === "Publié") return "bg-emerald-100 text-emerald-700";
+
+  if (s === "A_TRAITER" || st === "Nouveau") return "bg-neutral-100 text-neutral-700";
   if (st === "À revoir") return "bg-amber-100 text-amber-700";
   return "bg-neutral-100 text-neutral-700";
 }
+
+function normalizeStatusForFilter(st?: string) {
+  const s = (st || "").toString().trim().toUpperCase();
+  // on considère l'ancien "PUBLIE" comme "RESOLU" pour les filtres
+  if (s === "PUBLIE") return "RESOLU";
+  return s;
+}
+
+const STATUS_OPTIONS = [
+  { value: "A_TRAITER", label: "À traiter" },
+  { value: "RESOLU", label: "Résolu" },
+] as const;
+
 
 function originLabel(origins?: string[], type?: string) {
   const o = (origins || [])[0];
@@ -108,6 +130,26 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   const inputs = c?.inputs || {};
   const participants = c?.participants || {};
   const context = c?.context || {};
+
+  // Installateur / société
+  // Cible principale: context.societe (comme demandé)
+  // Compat: certains chantiers ont context.installateur.societe / nom / name / company...
+  const installerCompany =
+    (context?.societe ??
+      context?.installateur?.societe ??
+      context?.installateur?.company ??
+      context?.installateur?.company_name ??
+      context?.installateur?.companyName ??
+      null) as any;
+
+  const installerName =
+    (context?.installateur?.nom ??
+      context?.installateur?.name ??
+      context?.installateur?.full_name ??
+      context?.installateur?.fullName ??
+      null) as any;
+
+  const installer = installerCompany ?? installerName ?? null;
 
   const sessionIds: string[] = Array.isArray(links?.session_ids)
     ? links.session_ids
@@ -139,6 +181,7 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   return {
     group_key: chantierId, // important: clé utilisée dans l’URL
     chantier_id: chantierId,
+    installateur: installer ? String(installer).trim() : null,
     status: st,
     type: "chantier",
     origins: ["chantier_json"],
@@ -274,6 +317,46 @@ export default function SavSessionsListPage() {
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // édition statut chantier
+  const [statusUpdatingKey, setStatusUpdatingKey] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+
+  const updateChantierStatus = async (chantierId: string, nextStatus: string, rowKey: string) => {
+    setStatusError(null);
+    if (!chantierId) return;
+
+    setStatusUpdatingKey(rowKey);
+    try {
+      const res = await fetch(
+        buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+          cache: "no-store",
+        }
+      );
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        setStatusError(
+          txt && txt.length < 220
+            ? `Erreur statut: ${txt}`
+            : "Erreur lors de la mise à jour du statut."
+        );
+        return;
+      }
+
+      // refresh simple pour éviter les dé-synchronisations
+      await fetchOverview();
+    } catch (e) {
+      console.error("updateChantierStatus error", e);
+      setStatusError("Erreur réseau lors de la mise à jour du statut.");
+    } finally {
+      setStatusUpdatingKey(null);
+    }
+  };
+
   // non-vu persistant : map group_key -> signature
   const [seenSig, setSeenSig] = useState<Record<string, string>>({});
 
@@ -391,7 +474,7 @@ export default function SavSessionsListPage() {
 
     return unattached.filter((c) => {
       if (statusNorm) {
-        const st = (c.status || "").toString().trim().toUpperCase();
+        const st = normalizeStatusForFilter(c.status);
         if (st !== statusNorm) return false;
       }
 
@@ -404,6 +487,7 @@ export default function SavSessionsListPage() {
         c.type,
         ...(c.session_ids || []),
         ...(c.sender_numbers || []),
+        c.installateur || "",
         c.report_recipient_number || "",
       ]
         .filter(Boolean)
@@ -421,7 +505,7 @@ export default function SavSessionsListPage() {
 
     return chantiers.filter((c) => {
       if (statusNorm) {
-        const st = (c.status || "").toString().trim().toUpperCase();
+        const st = normalizeStatusForFilter(c.status);
         if (st !== statusNorm) return false;
       }
 
@@ -434,6 +518,7 @@ export default function SavSessionsListPage() {
         c.type,
         ...(c.session_ids || []),
         ...(c.sender_numbers || []),
+        c.installateur || "",
         c.report_recipient_number || "",
       ]
         .filter(Boolean)
@@ -500,6 +585,7 @@ export default function SavSessionsListPage() {
           r.chantier_id || "",
           ...(r.sender_numbers || []),
           ...(r.session_ids || []),
+          r.installateur || "",
           r.report_recipient_number || "",
         ]
           .filter(Boolean)
@@ -678,12 +764,22 @@ export default function SavSessionsListPage() {
 
     return (
       <div className="overflow-x-auto">
-        <table className="min-w-full text-sm">
+        <table className="min-w-full text-sm table-fixed">
+          <colgroup>
+            <col className="w-[170px]" />
+            <col className="w-[120px]" />
+            <col className="w-[260px]" />
+            <col className="w-[170px]" />
+            <col className="w-[170px]" />
+            <col className="w-[90px]" />
+            <col className="w-[90px]" />
+            <col className="w-[240px]" />
+          </colgroup>
           <thead>
             <tr className="border-b border-neutral-200 bg-neutral-50">
               <th className="text-left py-2 px-2">Dernière activité</th>
               <th className="text-left py-2 px-2">Statut</th>
-              <th className="text-left py-2 px-2">Origine</th>
+              <th className="text-left py-2 px-2">Installateur</th>
               <th className="text-left py-2 px-2">Chantier</th>
               <th className="text-left py-2 px-2">Numéros</th>
               <th className="text-left py-2 px-2">Sessions</th>
@@ -721,19 +817,43 @@ export default function SavSessionsListPage() {
                   </td>
 
                   <td className="py-2 px-2 align-top">
-                    <span
-                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${statusPillClass(
-                        c.status
-                      )}`}
-                    >
-                      {statusLabel(c.status)}
-                    </span>
+                    {c.type === "chantier" && (c.chantier_id || "").trim() ? (
+                      <select
+                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs border border-transparent ${statusPillClass(
+                          normalizeStatusForFilter(c.status)
+                        )} ${statusUpdatingKey === c.group_key ? "opacity-60 cursor-wait" : "cursor-pointer"}`}
+                        value={normalizeStatusForFilter(c.status) || "A_TRAITER"}
+                        onChange={(e) =>
+                          updateChantierStatus(
+                            String(c.chantier_id || ""),
+                            e.target.value,
+                            c.group_key
+                          )
+                        }
+                        disabled={statusUpdatingKey === c.group_key}
+                        title="Modifier le statut du chantier"
+                      >
+                        {STATUS_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${statusPillClass(
+                          c.status
+                        )}`}
+                      >
+                        {statusLabel(c.status)}
+                      </span>
+                    )}
                   </td>
 
                   <td className="py-2 px-2 align-top">
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-sky-50 text-sky-700 border border-sky-100">
-                      {originLabel(c.origins, c.type)}
-                    </span>
+                    <div className="text-xs text-neutral-700">
+                      {c.installateur ? String(c.installateur) : "—"}
+                    </div>
                   </td>
 
                   <td className="py-2 px-2 align-top">
@@ -859,14 +979,14 @@ export default function SavSessionsListPage() {
               >
                 <option value="">Tous</option>
                 <option value="A_TRAITER">À traiter</option>
-                <option value="PUBLIE">Publié</option>
+                <option value="RESOLU">Résolu</option>
               </select>
             </label>
 
             <div className="flex items-center gap-2">
               <input
                 className="rounded-lg border border-neutral-300 px-3 py-1 text-sm bg-white w-full md:w-64"
-                placeholder="Recherche (chantier / numéro / session)…"
+                placeholder="Recherche (chantier / installateur / numéro / session)…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => {
@@ -930,6 +1050,10 @@ export default function SavSessionsListPage() {
 
         {!loading && !error && deleteError && (
           <div className="text-sm text-red-600">{deleteError}</div>
+        )}
+
+        {!loading && !error && statusError && (
+          <div className="text-sm text-red-600">{statusError}</div>
         )}
 
         {!loading && !error && (
