@@ -17,6 +17,10 @@ const normalizeApiUrl = (u?: string | null) => {
   if (u.startsWith("http://") || u.startsWith("https://")) return u;
   return buildUrl(u); // u est un path type "/sessions/..."
 };
+// ✅ user dropdown (beta auth)
+const CURRENT_USER_STORAGE_KEY = "sav_current_user_v1";
+const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge"] as const;
+
 
 type SessionPhoto = {
   id: string; // ⚠️ dans la session: "p1", "p2"... / dans l'UI chantier: "sessionid__p1"
@@ -352,8 +356,34 @@ export default function SavSessionDetailPage() {
 
   const [toast, setToast] = useState<Toast | null>(null);
 
+  // ✅ current user (stored in localStorage)
+  const [currentUser, setCurrentUser] = useState<string>("Xavier Briffa");
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CURRENT_USER_STORAGE_KEY);
+      if (raw && typeof raw === "string" && raw.trim()) setCurrentUser(raw.trim());
+    } catch {
+      // ignore
+    }
+  }, []);
+  const persistCurrentUser = (u: string) => {
+    setCurrentUser(u);
+    try {
+      localStorage.setItem(CURRENT_USER_STORAGE_KEY, u);
+    } catch {
+      // ignore
+    }
+  };
+
+
+  // keep legacy "author" in sync (publish metadata)
+  useEffect(() => {
+    setAuthor(currentUser);
+  }, [currentUser]);
+
+
   // Actions
-  const [author, setAuthor] = useState<string>("Xavier PERGE");
+  const [author, setAuthor] = useState<string>("Xavier Briffa");
   const [publishing, setPublishing] = useState(false);
 
   // Inputs selection
@@ -461,7 +491,39 @@ export default function SavSessionDetailPage() {
 
 
 
-  // --- Load (UNIFIED): /sav/item/{key} ---
+  
+  const reload = useCallback(async () => {
+    if (!key) return;
+    try {
+      const res = await fetch(buildUrl(`/sav/item/${encodeURIComponent(key)}`));
+      if (!res.ok) return;
+      const data = (await res.json()) as SavItemResponse;
+      if ((data as any)?.error) return;
+
+      const sessions = (data as any).sessions as SessionDetail[];
+      const kind = (data as any).kind as "chantier" | "unattached_session";
+      const chantierId = (data as any).chantier_id ?? null;
+      const chantierObj = (data as any).chantier ?? null;
+
+      setChantierMeta({
+        kind,
+        chantier_id: chantierId,
+        session_count: (data as any).session_count ?? sessions.length,
+        session_ids: sessions.map((s) => s.session_id).filter(Boolean),
+      });
+
+      if (kind === "chantier") setChantier(chantierObj as Chantier);
+      else setChantier(null);
+
+      const most = pickMostRecentSession(sessions) || sessions[0];
+      setDetail(most);
+      setLoadedSessionId(most?.session_id || "");
+    } catch (e) {
+      console.error("reload error", e);
+    }
+  }, [key]);
+
+// --- Load (UNIFIED): /sav/item/{key} ---
   useEffect(() => {
     if (!key) {
       setLoading(false);
@@ -667,7 +729,7 @@ export default function SavSessionDetailPage() {
         const res = await fetch(buildUrl(`/sessions/${encodeURIComponent(effectiveSessionId)}`), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(patch),
+          body: JSON.stringify({ ...patch, actor: currentUser }),
         });
         if (!res.ok) {
           const txt = await res.text();
@@ -686,7 +748,7 @@ export default function SavSessionDetailPage() {
         });
       }
     },
-    [effectiveSessionId]
+    [effectiveSessionId, currentUser]
   );
 
   // --- Persist chantier meta (PATCH /chantiers/{id}) ---
@@ -697,7 +759,7 @@ export default function SavSessionDetailPage() {
         const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantierMeta.chantier_id)}`), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(patch),
+          body: JSON.stringify({ ...patch, actor: currentUser }),
         });
         if (!res.ok) {
           const txt = await res.text();
@@ -716,7 +778,7 @@ export default function SavSessionDetailPage() {
         });
       }
     },
-    [chantierMeta.chantier_id]
+    [chantierMeta.chantier_id, currentUser]
   );
 
   const debouncedPatchSession = useDebouncedCallback(patchSession, 600);
@@ -1414,7 +1476,7 @@ export default function SavSessionDetailPage() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ author }),
+            body: JSON.stringify({ author, actor: currentUser }),
           }
         );
 
@@ -1494,19 +1556,13 @@ const handleChantierStatusChange = useCallback(
   async (nextStatus: "A_TRAITER" | "RESOLU") => {
     if (!isChantierMode || !chantierMeta.chantier_id) return;
 
+    // Optimistic UI
+    setChantier((prev) => (prev ? ({ ...(prev as any), status: nextStatus } as any) : prev));
+
     try {
-      const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantierMeta.chantier_id)}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: nextStatus }),
-      });
+      // Persist backend (PATCH /chantiers/{id}) – actor est ajouté dans patchChantier
+      await patchChantier({ status: nextStatus });
 
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(txt || `Erreur patch statut (${res.status})`);
-      }
-
-      setChantier((prev) => (prev ? { ...(prev as any), status: nextStatus } : prev));
       setToast({
         type: "success",
         message: `Statut mis à jour : ${nextStatus === "RESOLU" ? "Résolu" : "À traiter"}.`,
@@ -1519,10 +1575,36 @@ const handleChantierStatusChange = useCallback(
       });
     }
   },
-  [isChantierMode, chantierMeta.chantier_id]
+  [isChantierMode, chantierMeta.chantier_id, patchChantier]
 );
 
-  return (
+const handleChantierOwnerChange = useCallback(
+  async (nextOwner: string) => {
+    if (!isChantierMode || !chantierMeta.chantier_id) return;
+
+    // Optimistic UI
+    setChantier((prev) => (prev ? ({ ...(prev as any), owner: nextOwner } as any) : prev));
+
+    try {
+      // Persist backend (PATCH /chantiers/{id}) – actor est ajouté dans patchChantier
+      await patchChantier({ owner: nextOwner });
+
+      setToast({
+        type: "success",
+        message: `Propriétaire mis à jour : ${nextOwner}.`,
+      });
+    } catch (err) {
+      console.error(err);
+      setToast({
+        type: "error",
+        message: (err as any)?.message || "Impossible de mettre à jour le propriétaire.",
+      });
+    }
+  },
+  [isChantierMode, chantierMeta.chantier_id, patchChantier]
+);
+
+return (
     <main className="min-h-screen bg-neutral-100">
       {/* Top header */}
       <header className="border-b bg-white">
@@ -1537,6 +1619,19 @@ const handleChantierStatusChange = useCallback(
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
               {isChantierMode ? humanChantierStatus((chantier as any)?.status) : humanStatus(detail?.status)}
             </span>
+
+            <select
+              className="rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-xs text-neutral-800 shadow-sm hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-neutral-400 focus:ring-offset-2"
+              value={currentUser}
+              onChange={(e) => persistCurrentUser(e.target.value)}
+              title="Utilisateur courant (sert à attribuer les activités)"
+            >
+              {USERS.map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
+            </select>
 
 {isChantierMode && chantierMeta.chantier_id && (
   <select
@@ -1595,6 +1690,23 @@ const handleChantierStatusChange = useCallback(
                 </span>
               )}
             </p>
+            {isChantierMode && chantierMeta.chantier_id ? (
+              <div className="mt-2 flex items-center gap-2 text-xs">
+                <span className="text-neutral-500">Propriétaire :</span>
+                <select
+                  className="rounded-lg border border-neutral-300 bg-white px-2 py-1 text-xs"
+                  value={String((chantier as any)?.owner || "Xavier Briffa")}
+                  onChange={(e) => handleChantierOwnerChange(e.target.value)}
+                >
+                  {USERS.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
 
             {chantierMeta.kind && (
               <p className="text-[11px] text-neutral-400 mt-1">
@@ -2371,6 +2483,8 @@ const handleChantierStatusChange = useCallback(
           <div className="bg-neutral-900 rounded-xl max-w-6xl w-[95vw] max-h-[90vh] flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 flex-none">
               <div className="text-sm text-neutral-100">{fullscreen.title}</div>
+              
+
               <button
                 type="button"
                 onClick={() => setFullscreen(null)}
@@ -2408,6 +2522,125 @@ const handleChantierStatusChange = useCallback(
           </div>
         </div>
       )}
-    </main>
+
+      {/* ✅ Historique d’activité (chantier) — tout en bas, repliable */}
+      {isChantierMode ? (
+        <section className="mt-6">
+          <details className="bg-white rounded-xl border border-neutral-200 overflow-hidden">
+            <summary className="cursor-pointer select-none px-4 py-3 flex items-center justify-between">
+              <div className="text-sm font-semibold text-neutral-900">
+                Historique d’activité
+              </div>
+              <div className="text-xs text-neutral-500">
+                {((chantier as any)?.activity_log?.last_activity_at || (chantier as any)?.updated_at) ? (
+                  <>
+                    {formatTs(((chantier as any)?.activity_log?.last_activity_at as any) || (chantier as any)?.updated_at)}
+                    {((chantier as any)?.activity_log?.last_activity_by ? (
+                      <>
+                        {" "}
+                        · {String((chantier as any)?.activity_log?.last_activity_by)}
+                      </>
+                    ) : null)}
+                  </>
+                ) : (
+                  "—"
+                )}
+              </div>
+            </summary>
+
+            <div className="px-4 pb-4">
+              <div className="mt-2 text-xs text-neutral-600">
+                <div>
+                  Dernière activité :{" "}
+                  <span className="font-medium">
+                    {formatTs(((chantier as any)?.activity_log?.last_activity_at as any) || (chantier as any)?.updated_at)}
+                  </span>
+                  {((chantier as any)?.activity_log?.last_activity_by ? (
+                    <>
+                      {" "}
+                      par <span className="font-medium">{String((chantier as any)?.activity_log?.last_activity_by)}</span>
+                    </>
+                  ) : null)}
+                </div>
+              </div>
+
+              <div className="mt-3">
+                {(() => {
+                  const al = (chantier as any)?.activity_log || {};
+                  const events =
+                    (al.events as any[]) ||
+                    (al.activities as any[]) ||
+                    (al.items as any[]) ||
+                    [];
+                  const rows = Array.isArray(events)
+                    ? events.slice().reverse().slice(0, 30)
+                    : [];
+                  if (!rows.length) {
+                    return (
+                      <div className="text-xs text-neutral-500">
+                        Aucune activité enregistrée.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="divide-y divide-neutral-100 border border-neutral-200 rounded-lg overflow-hidden">
+                      {rows.map((ev, idx) => {
+                        const ts =
+                          ev.ts ??
+                          ev.at ??
+                          ev.timestamp ??
+                          ev.created_at ??
+                          ev.updated_at ??
+                          null;
+                        const actor =
+                          ev.actor ?? ev.by ?? ev.user ?? ev.author ?? "";
+                        const typ =
+                          ev.type ??
+                          ev.kind ??
+                          ev.action ??
+                          "CHANTIER_UPDATED";
+                        const details =
+                          ev.details ?? ev.patch ?? ev.fields ?? null;
+
+                        return (
+                          <div key={idx} className="px-3 py-2 bg-white">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="font-medium text-neutral-900">
+                                {String(typ)}
+                              </div>
+                              <div className="text-[11px] text-neutral-500">
+                                {formatTs(typeof ts === "number" ? ts : null)}
+                              </div>
+                            </div>
+                            <div className="mt-0.5 text-[11px] text-neutral-600">
+                              {actor ? (
+                                <>
+                                  par{" "}
+                                  <span className="font-medium">
+                                    {String(actor)}
+                                  </span>
+                                </>
+                              ) : (
+                                "—"
+                              )}
+                            </div>
+                            {details ? (
+                              <pre className="mt-2 text-[11px] whitespace-pre-wrap break-words bg-neutral-50 border border-neutral-200 rounded p-2 text-neutral-700">
+                                {JSON.stringify(details, null, 2)}
+                              </pre>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          </details>
+        </section>
+      ) : null}
+
+      </main>
   );
 }

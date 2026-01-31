@@ -42,8 +42,14 @@ type ChantierAggItem = {
 
   photo_count?: number;
 
+  // legacy / inbox timestamps (sessions non rattachées)
   updated_at?: number;
   created_at?: number;
+
+  // ✅ NOUVEAU: propriétaire + activité réelle (pour chantiers)
+  owner?: string | null;
+  last_activity_at?: number | null;
+  last_activity_by?: string | null;
 };
 
 // --- Chantiers JSON (format large, on le “projette” en ChantierAggItem) ---
@@ -82,9 +88,11 @@ function statusPillClass(st?: string) {
   const s = (st || "").toUpperCase();
   if (s === "RESOLU") return "bg-emerald-100 text-emerald-700";
   // legacy
-  if (s === "PUBLIE" || st === "Publié") return "bg-emerald-100 text-emerald-700";
+  if (s === "PUBLIE" || st === "Publié")
+    return "bg-emerald-100 text-emerald-700";
 
-  if (s === "A_TRAITER" || st === "Nouveau") return "bg-neutral-100 text-neutral-700";
+  if (s === "A_TRAITER" || st === "Nouveau")
+    return "bg-neutral-100 text-neutral-700";
   if (st === "À revoir") return "bg-amber-100 text-amber-700";
   return "bg-neutral-100 text-neutral-700";
 }
@@ -101,7 +109,6 @@ const STATUS_OPTIONS = [
   { value: "RESOLU", label: "Résolu" },
 ] as const;
 
-
 function originLabel(origins?: string[], type?: string) {
   const o = (origins || [])[0];
   if (o === "inbox_whatsapp") return "Inbox WhatsApp";
@@ -115,16 +122,32 @@ function originLabel(origins?: string[], type?: string) {
 
 const SEEN_STORAGE_KEY = "sav_sessions_seen_sig_v1";
 
+// ✅ user dropdown
+const CURRENT_USER_STORAGE_KEY = "sav_current_user_v1";
+const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge"] as const;
+
 function normalizeStr(v: any) {
-  return String(v || "")
-    .trim()
-    .toLowerCase();
+  return String(v || "").trim().toLowerCase();
+}
+
+function pickChantierActivityTs(c: ChantierJson): number | undefined {
+  const al = c?.activity_log || {};
+  const ts =
+    al?.last_activity_at ??
+    c?.updated_at ??
+    c?.meta?.updated_at ??
+    c?.created_at ??
+    c?.meta?.created_at ??
+    undefined;
+  return typeof ts === "number" ? ts : undefined;
 }
 
 function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   // chantier_id canonique
   const chantierId =
-    (c?.chantier_id ?? c?.id ?? c?.reference ?? c?.ref ?? "").toString().trim();
+    (c?.chantier_id ?? c?.id ?? c?.reference ?? c?.ref ?? "")
+      .toString()
+      .trim();
 
   const links = c?.links || {};
   const inputs = c?.inputs || {};
@@ -132,8 +155,6 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   const context = c?.context || {};
 
   // Installateur / société
-  // Cible principale: context.societe (comme demandé)
-  // Compat: certains chantiers ont context.installateur.societe / nom / name / company...
   const installerCompany =
     (context?.societe ??
       context?.installateur?.societe ??
@@ -178,6 +199,10 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
 
   const reportRecipient = participants?.report_recipient_phone ?? null;
 
+  const owner = (c?.owner ?? "Xavier Briffa") as any;
+  const lastActivityAt = pickChantierActivityTs(c);
+  const lastActivityBy = (c?.activity_log?.last_activity_by ?? null) as any;
+
   return {
     group_key: chantierId, // important: clé utilisée dans l’URL
     chantier_id: chantierId,
@@ -190,19 +215,20 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
     session_ids: sessionIds,
     session_count: sessionIds.length,
     photo_count: photosArr.length,
+
+    // legacy timestamps kept (not used for sorting “Dernière activité” anymore)
     updated_at: c?.updated_at ?? c?.meta?.updated_at ?? undefined,
     created_at: c?.created_at ?? c?.meta?.created_at ?? undefined,
+
+    owner: owner ? String(owner).trim() : "Xavier Briffa",
+    last_activity_at: lastActivityAt,
+    last_activity_by: lastActivityBy ? String(lastActivityBy).trim() : null,
   };
 }
 
 function TrashIcon({ className = "w-4 h-4" }: { className?: string }) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      className={className}
-      aria-hidden="true"
-    >
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
       <path
         d="M9 3h6m-9 4h12M10 7v13m4-13v13M7 7l1 15h8l1-15"
         stroke="currentColor"
@@ -227,7 +253,29 @@ export default function SavSessionsListPage() {
 
   // filtres
   const [statusFilter, setStatusFilter] = useState<string>("");
+  const [ownerFilter, setOwnerFilter] = useState<string>(""); // ✅ AJOUT
   const [search, setSearch] = useState<string>("");
+
+  // ✅ user dropdown
+  const [currentUser, setCurrentUser] = useState<string>("Xavier Briffa");
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(CURRENT_USER_STORAGE_KEY);
+      if (raw && typeof raw === "string" && raw.trim()) {
+        setCurrentUser(raw.trim());
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+  const persistCurrentUser = (u: string) => {
+    setCurrentUser(u);
+    try {
+      localStorage.setItem(CURRENT_USER_STORAGE_KEY, u);
+    } catch {
+      // ignore
+    }
+  };
 
   // -------------------------------------------------------------------
   // ✅ AJOUT MVP: envoi template WhatsApp "request photos"
@@ -289,8 +337,6 @@ export default function SavSessionsListPage() {
       }
 
       setWaMsg("✅ Template WhatsApp envoyé.");
-      // optionnel: reset
-      // setWaPhone("");
     } catch (e) {
       console.error("sendWhatsAppTemplate error", e);
       setWaMsg("Erreur réseau lors de l’envoi WhatsApp.");
@@ -321,7 +367,11 @@ export default function SavSessionsListPage() {
   const [statusUpdatingKey, setStatusUpdatingKey] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  const updateChantierStatus = async (chantierId: string, nextStatus: string, rowKey: string) => {
+  const updateChantierStatus = async (
+    chantierId: string,
+    nextStatus: string,
+    rowKey: string
+  ) => {
     setStatusError(null);
     if (!chantierId) return;
 
@@ -332,7 +382,7 @@ export default function SavSessionsListPage() {
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: nextStatus }),
+          body: JSON.stringify({ status: nextStatus, actor: currentUser }),
           cache: "no-store",
         }
       );
@@ -347,13 +397,55 @@ export default function SavSessionsListPage() {
         return;
       }
 
-      // refresh simple pour éviter les dé-synchronisations
       await fetchOverview();
     } catch (e) {
       console.error("updateChantierStatus error", e);
       setStatusError("Erreur réseau lors de la mise à jour du statut.");
     } finally {
       setStatusUpdatingKey(null);
+    }
+  };
+
+  // ✅ édition owner (propriétaire)
+  const [ownerUpdatingKey, setOwnerUpdatingKey] = useState<string | null>(null);
+  const [ownerError, setOwnerError] = useState<string | null>(null);
+
+  const updateChantierOwner = async (
+    chantierId: string,
+    nextOwner: string,
+    rowKey: string
+  ) => {
+    setOwnerError(null);
+    if (!chantierId) return;
+
+    setOwnerUpdatingKey(rowKey);
+    try {
+      const res = await fetch(
+        buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ owner: nextOwner, actor: currentUser }),
+          cache: "no-store",
+        }
+      );
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        setOwnerError(
+          txt && txt.length < 220
+            ? `Erreur propriétaire: ${txt}`
+            : "Erreur lors de la mise à jour du propriétaire."
+        );
+        return;
+      }
+
+      await fetchOverview();
+    } catch (e) {
+      console.error("updateChantierOwner error", e);
+      setOwnerError("Erreur réseau lors de la mise à jour du propriétaire.");
+    } finally {
+      setOwnerUpdatingKey(null);
     }
   };
 
@@ -385,7 +477,13 @@ export default function SavSessionsListPage() {
     const pc =
       (typeof c.photo_count === "number" ? c.photo_count : undefined) ??
       ((c.session_ids || []).length || c.session_count || 0);
-    const u = c.updated_at || c.created_at || 0;
+
+    // ✅ pour les chantiers, la “vraie activité”
+    const u =
+      c.type === "chantier"
+        ? c.last_activity_at || c.updated_at || c.created_at || 0
+        : c.updated_at || c.created_at || 0;
+
     return `${u}__${pc}`;
   };
 
@@ -425,12 +523,11 @@ export default function SavSessionsListPage() {
         ? data.unattached_groups.map((g) => ({
             ...g,
             type: "inbox",
-            // sécurité: s’assurer qu’on a bien group_key
             group_key: String(g.group_key || g.session_ids?.[0] || ""),
           }))
         : [];
 
-      // tri: plus récent en haut
+      // tri: plus récent en haut (inbox)
       nextUnattached.sort(
         (a, b) =>
           (b.updated_at || b.created_at || 0) -
@@ -443,11 +540,11 @@ export default function SavSessionsListPage() {
         .map(buildRowFromChantierJson)
         .filter((x) => (x.chantier_id || "").trim() !== "");
 
-      // tri: plus récent en haut
+      // ✅ tri: activité réelle en haut
       nextChantiers.sort(
         (a, b) =>
-          (b.updated_at || b.created_at || 0) -
-          (a.updated_at || a.created_at || 0)
+          (b.last_activity_at || b.updated_at || b.created_at || 0) -
+          (a.last_activity_at || a.updated_at || a.created_at || 0)
       );
 
       setUnattached(nextUnattached);
@@ -502,11 +599,17 @@ export default function SavSessionsListPage() {
     const q = search.trim();
     const qn = normalizeStr(q);
     const statusNorm = (statusFilter || "").trim().toUpperCase();
+    const ownerNorm = (ownerFilter || "").trim().toLowerCase();
 
     return chantiers.filter((c) => {
       if (statusNorm) {
         const st = normalizeStatusForFilter(c.status);
         if (st !== statusNorm) return false;
+      }
+
+      if (ownerNorm) {
+        const o = (c.owner || "Xavier Briffa").toString().trim().toLowerCase();
+        if (o !== ownerNorm) return false;
       }
 
       if (!qn) return true;
@@ -516,6 +619,7 @@ export default function SavSessionsListPage() {
         c.chantier_id,
         c.status,
         c.type,
+        c.owner || "",
         ...(c.session_ids || []),
         ...(c.sender_numbers || []),
         c.installateur || "",
@@ -527,7 +631,7 @@ export default function SavSessionsListPage() {
 
       return hay.includes(qn);
     });
-  }, [chantiers, search, statusFilter]);
+  }, [chantiers, search, statusFilter, ownerFilter]);
 
   const openAttachModal = (row: ChantierAggItem) => {
     setAttachTarget(row);
@@ -565,7 +669,6 @@ export default function SavSessionsListPage() {
     setAttachError(null);
 
     try {
-      // MVP: on récupère la liste chantier JSON et on filtre côté front
       const res = await fetch(buildUrl("/sav/overview"), { cache: "no-store" });
       if (!res.ok) {
         setAttachError("Erreur lors de la recherche chantier.");
@@ -628,7 +731,7 @@ export default function SavSessionsListPage() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chantier_id: chantierId }),
+          body: JSON.stringify({ chantier_id: chantierId, actor: currentUser }),
           cache: "no-store",
         }
       );
@@ -643,9 +746,7 @@ export default function SavSessionsListPage() {
         return;
       }
 
-      // action => vu
       markSeen(attachTarget);
-
       closeAttachModal();
       await fetchOverview();
     } catch (e) {
@@ -680,18 +781,15 @@ export default function SavSessionsListPage() {
       setDeletingKey(row.group_key);
 
       try {
-        // Supprimer toutes les sessions du groupe (souvent 1)
         for (const sid of sids) {
-          const res = await fetch(
-            buildUrl(`/sessions/${encodeURIComponent(sid)}`),
-            { method: "DELETE", cache: "no-store" }
-          );
+          const res = await fetch(buildUrl(`/sessions/${encodeURIComponent(sid)}`), {
+            method: "DELETE",
+            cache: "no-store",
+          });
           if (!res.ok) {
             const txt = await res.text().catch(() => "");
             throw new Error(
-              txt && txt.length < 220
-                ? txt
-                : `Erreur suppression session ${sid}`
+              txt && txt.length < 220 ? txt : `Erreur suppression session ${sid}`
             );
           }
         }
@@ -700,9 +798,7 @@ export default function SavSessionsListPage() {
       } catch (e: any) {
         console.error("delete session(s) error", e);
         setDeleteError(
-          e?.message
-            ? `Suppression impossible: ${e.message}`
-            : "Suppression impossible."
+          e?.message ? `Suppression impossible: ${e.message}` : "Suppression impossible."
         );
       } finally {
         setDeletingKey(null);
@@ -725,24 +821,20 @@ export default function SavSessionsListPage() {
     setDeletingKey(row.group_key);
 
     try {
-      const res = await fetch(
-        buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`),
-        { method: "DELETE", cache: "no-store" }
-      );
+      const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`), {
+        method: "DELETE",
+        cache: "no-store",
+      });
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
-        throw new Error(
-          txt && txt.length < 220 ? txt : "Erreur suppression chantier"
-        );
+        throw new Error(txt && txt.length < 220 ? txt : "Erreur suppression chantier");
       }
 
       await fetchOverview();
     } catch (e: any) {
       console.error("delete chantier error", e);
       setDeleteError(
-        e?.message
-          ? `Suppression impossible: ${e.message}`
-          : "Suppression impossible."
+        e?.message ? `Suppression impossible: ${e.message}` : "Suppression impossible."
       );
     } finally {
       setDeletingKey(null);
@@ -753,10 +845,12 @@ export default function SavSessionsListPage() {
     rows,
     emptyLabel,
     showAttachForUnattached,
+    showOwnerColumn,
   }: {
     rows: ChantierAggItem[];
     emptyLabel: string;
     showAttachForUnattached: boolean;
+    showOwnerColumn: boolean;
   }) => {
     if (rows.length === 0) {
       return <div className="text-sm text-neutral-500">{emptyLabel}</div>;
@@ -768,6 +862,7 @@ export default function SavSessionsListPage() {
           <colgroup>
             <col className="w-[170px]" />
             <col className="w-[120px]" />
+            {showOwnerColumn ? <col className="w-[180px]" /> : null}
             <col className="w-[260px]" />
             <col className="w-[170px]" />
             <col className="w-[170px]" />
@@ -779,6 +874,9 @@ export default function SavSessionsListPage() {
             <tr className="border-b border-neutral-200 bg-neutral-50">
               <th className="text-left py-2 px-2">Dernière activité</th>
               <th className="text-left py-2 px-2">Statut</th>
+              {showOwnerColumn ? (
+                <th className="text-left py-2 px-2">Propriétaire</th>
+              ) : null}
               <th className="text-left py-2 px-2">Installateur</th>
               <th className="text-left py-2 px-2">Chantier</th>
               <th className="text-left py-2 px-2">Numéros</th>
@@ -792,17 +890,21 @@ export default function SavSessionsListPage() {
               const isRattachee = Boolean((c.chantier_id || "").trim());
               const nonRattachee = !isRattachee;
 
-              const sidCount =
-                (c.session_ids || []).length || c.session_count || 0;
-
-              const photoCount =
-                typeof c.photo_count === "number" ? c.photo_count : 0;
+              const sidCount = (c.session_ids || []).length || c.session_count || 0;
+              const photoCount = typeof c.photo_count === "number" ? c.photo_count : 0;
 
               const sig = computeSig(c);
               const isUnseen = (seenSig[c.group_key] || "") !== sig;
 
-              const isUnattachedTable = showAttachForUnattached; // ici: table "Sessions non rattachées"
+              const isUnattachedTable = showAttachForUnattached;
               const isDeleting = deletingKey === c.group_key;
+
+              const lastTs =
+                c.type === "chantier"
+                  ? c.last_activity_at || c.updated_at || c.created_at
+                  : c.updated_at || c.created_at;
+
+              const isOwnerUpdating = ownerUpdatingKey === c.group_key;
 
               return (
                 <tr
@@ -813,7 +915,12 @@ export default function SavSessionsListPage() {
                   ].join(" ")}
                 >
                   <td className="py-2 px-2 align-top">
-                    {formatTs(c.updated_at || c.created_at)}
+                    <div className="flex flex-col gap-1">
+                      <div>{formatTs(lastTs)}</div>
+                      {c.type === "chantier" && c.last_activity_by ? (
+                        <div className="text-[11px] text-neutral-500">par {c.last_activity_by}</div>
+                      ) : null}
+                    </div>
                   </td>
 
                   <td className="py-2 px-2 align-top">
@@ -850,6 +957,37 @@ export default function SavSessionsListPage() {
                     )}
                   </td>
 
+                  {showOwnerColumn ? (
+                    <td className="py-2 px-2 align-top">
+                      {c.type === "chantier" && (c.chantier_id || "").trim() ? (
+                        <select
+                          className={[
+                            "rounded-lg border border-neutral-300 px-2 py-1 text-xs bg-white",
+                            isOwnerUpdating ? "opacity-60 cursor-wait" : "cursor-pointer",
+                          ].join(" ")}
+                          value={(c.owner || "Xavier Briffa").toString()}
+                          onChange={(e) =>
+                            updateChantierOwner(
+                              String(c.chantier_id || ""),
+                              e.target.value,
+                              c.group_key
+                            )
+                          }
+                          disabled={isOwnerUpdating}
+                          title="Modifier le propriétaire du chantier"
+                        >
+                          {USERS.map((u) => (
+                            <option key={u} value={u}>
+                              {u}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="text-xs text-neutral-500">—</span>
+                      )}
+                    </td>
+                  ) : null}
+
                   <td className="py-2 px-2 align-top">
                     <div className="text-xs text-neutral-700">
                       {c.installateur ? String(c.installateur) : "—"}
@@ -858,9 +996,7 @@ export default function SavSessionsListPage() {
 
                   <td className="py-2 px-2 align-top">
                     <div className="flex flex-col gap-1">
-                      <div className="font-medium">
-                        {isRattachee ? c.chantier_id : "—"}
-                      </div>
+                      <div className="font-medium">{isRattachee ? c.chantier_id : "—"}</div>
 
                       {nonRattachee && (
                         <div className="inline-flex items-center gap-1 text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-full px-2 py-0.5 w-fit">
@@ -885,9 +1021,7 @@ export default function SavSessionsListPage() {
                   </td>
 
                   <td className="py-2 px-2 align-top">
-                    <div className="text-xs text-neutral-700">
-                      {sidCount || 0}
-                    </div>
+                    <div className="text-xs text-neutral-700">{sidCount || 0}</div>
                   </td>
 
                   <td className="py-2 px-2 align-top">
@@ -914,7 +1048,6 @@ export default function SavSessionsListPage() {
                         </button>
                       )}
 
-                      {/* SUPPRIMER (icône) */}
                       <button
                         title="Supprimer"
                         onClick={() => handleDeleteRow(c, isUnattachedTable)}
@@ -943,7 +1076,22 @@ export default function SavSessionsListPage() {
     <main className="min-h-screen bg-neutral-100 text-neutral-900 p-6 flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Visual Assistant · Inbox SAV</h1>
+
+        {/* ✅ header right: user dropdown + actions (Accueil supprimé) */}
         <div className="flex items-center gap-3">
+          <select
+            className="rounded-lg border border-neutral-300 px-2 py-1 text-sm bg-white"
+            value={currentUser}
+            onChange={(e) => persistCurrentUser(e.target.value)}
+            title="Utilisateur courant (sert à attribuer les activités)"
+          >
+            {USERS.map((u) => (
+              <option key={u} value={u}>
+                {u}
+              </option>
+            ))}
+          </select>
+
           {isRefreshing && <span className="text-xs text-neutral-400">⟳</span>}
           <button
             onClick={fetchOverview}
@@ -951,6 +1099,7 @@ export default function SavSessionsListPage() {
           >
             Actualiser
           </button>
+
           <Link
             href="/generateur"
             className="text-sm text-neutral-600 hover:text-neutral-900 underline-offset-2 hover:underline"
@@ -983,6 +1132,22 @@ export default function SavSessionsListPage() {
               </select>
             </label>
 
+            <label className="text-sm text-neutral-700">
+              Propriétaire :
+              <select
+                className="ml-2 rounded-lg border border-neutral-300 px-2 py-1 text-sm bg-white"
+                value={ownerFilter}
+                onChange={(e) => setOwnerFilter(e.target.value)}
+              >
+                <option value="">Tous</option>
+                {USERS.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             <div className="flex items-center gap-2">
               <input
                 className="rounded-lg border border-neutral-300 px-3 py-1 text-sm bg-white w-full md:w-64"
@@ -1003,9 +1168,7 @@ export default function SavSessionsListPage() {
           </div>
         </div>
 
-        {/* ------------------------------------------------------------------- */}
-        {/* ✅ AJOUT UI (déplacé): bloc "Envoyer WhatsApp" SOUS la ligne des filtres */}
-        {/* ------------------------------------------------------------------- */}
+        {/* WhatsApp block */}
         <div className="mt-1">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
             <div className="text-sm text-neutral-700 font-medium">
@@ -1040,7 +1203,6 @@ export default function SavSessionsListPage() {
             </div>
           </div>
         </div>
-        {/* ------------------------------------------------------------------- */}
 
         {loading && <div className="text-sm text-neutral-500">Chargement…</div>}
 
@@ -1054,6 +1216,10 @@ export default function SavSessionsListPage() {
 
         {!loading && !error && statusError && (
           <div className="text-sm text-red-600">{statusError}</div>
+        )}
+
+        {!loading && !error && ownerError && (
+          <div className="text-sm text-red-600">{ownerError}</div>
         )}
 
         {!loading && !error && (
@@ -1078,10 +1244,10 @@ export default function SavSessionsListPage() {
                 rows={filteredUnattached}
                 emptyLabel="Aucune session non rattachée."
                 showAttachForUnattached={true}
+                showOwnerColumn={false}
               />
             </div>
 
-            {/* separator */}
             <div className="border-t border-neutral-200" />
 
             {/* 2) Chantiers */}
@@ -1104,6 +1270,7 @@ export default function SavSessionsListPage() {
                 rows={filteredChantiers}
                 emptyLabel="Aucun chantier."
                 showAttachForUnattached={false}
+                showOwnerColumn={true}
               />
             </div>
           </div>
