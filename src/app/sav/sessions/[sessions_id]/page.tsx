@@ -1,1630 +1,2574 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_INTERNAL_API || "http://localhost:8001";
+/**
+ * Chantier détail — Étape 2.5 (READ-ONLY + Chantier stable fini)
+ * Patch A: mapping safe + pas de "[object Object]" + champs vides si inconnus
+ * Patch B: Owner connecté à PATCH /chantiers/{chantier_id}
+ * Patch C: Recherche CRM (GET /contacts/search?q=...) + sélection => PATCH context.installateur
+ * Patch D: Produit connecté (GET /products + PATCH context.produit)
+ *
+ * ENV (compat ancien code):
+ *   NEXT_PUBLIC_INTERNAL_API (fallback http://localhost:8001)
+ *   NEXT_PUBLIC_INTERNAL_API_BASE_URL (optionnel)
+ */
 
-const WEBHOOK_BASE =
-  process.env.NEXT_PUBLIC_WEBHOOK_URL || "http://localhost:8000";
-
-const buildUrl = (path: string) => new URL(path, API_BASE).toString();
-const buildWebhookUrl = (path: string) => new URL(path, WEBHOOK_BASE).toString();
-const normalizeApiUrl = (u?: string | null) => {
-  if (!u) return null;
-  if (u.startsWith("http://") || u.startsWith("https://")) return u;
-  return buildUrl(u); // u est un path type "/sessions/..."
-};
-// ✅ user dropdown (beta auth)
-const CURRENT_USER_STORAGE_KEY = "sav_current_user_v1";
 const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge"] as const;
+type UserName = (typeof USERS)[number];
 
+const NOTE_TARGET_OPTIONS = [
+  { code: "INSTALLATEUR", label: "Installateur" },
+  { code: "COMMERCIAL", label: "Commercial" },
+  { code: "QUALITE", label: "Qualité" },
+  { code: "BUREAU_ETUDES", label: "Bureau d'études" },
+  { code: "DIRECTION", label: "Direction" },
+  { code: "INTERNE", label: "Interne" },
+] as const;
 
-type SessionPhoto = {
-  id: string; // ⚠️ dans la session: "p1", "p2"... / dans l'UI chantier: "sessionid__p1"
-  url: string;
-  timestamp?: number;
-  [key: string]: any;
+const NOTE_CHANNEL_OPTIONS = [
+  { code: "WHATSAPP", label: "WhatsApp" },
+  { code: "EMAIL", label: "Email" },
+  { code: "NONE", label: "—" },
+] as const;
 
-  // champs ajoutés côté UI (chantier multi-sessions)
-  __session_id?: string; // session d'origine
-  __photo_id?: string; // photo id d'origine ("p1")
+const NOTE_ALLOWED_CHANNELS_BY_TARGET: Record<NoteTargetCode, NoteChannelCode[]> = {
+  INSTALLATEUR: ["WHATSAPP", "EMAIL"],
+  COMMERCIAL: ["EMAIL"],
+  QUALITE: ["EMAIL"],
+  BUREAU_ETUDES: ["EMAIL"],
+  DIRECTION: ["EMAIL"],
+  INTERNE: ["NONE"],
 };
 
-type NoteAsset = {
-  asset_id: string;
-  kind?: string;
-  filename?: string;
-  relpath?: string;
-  created_at?: number;
-  asset_url?: string; // convenience côté UI (GET url)
-};
+type NoteTargetCode = (typeof NOTE_TARGET_OPTIONS)[number]["code"];
+type NoteChannelCode = (typeof NOTE_CHANNEL_OPTIONS)[number]["code"];
 
-type SessionSavItem = {
-  note_id: string;
-  title?: string;
-  body?: string;
-  assets?: NoteAsset[];
-  created_at?: number;
-  updated_at?: number;
-  [key: string]: any;
-};
+const CURRENT_USER_STORAGE_KEY = "sav_current_user_v1";
+const OWNER_STORAGE_KEY = "chantier_owner_v1";
 
-type SessionDetail = {
-  session_id: string;
+function cx(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
 
-  // legacy / v1
-  installateur?: {
-    user_id?: string;
-    nom?: string;
-    societe?: string;
-    email?: string;
-    phone?: string;
-  };
-  chantier?: { ref?: string };
-  produit?: { code?: string; label?: string; sheet?: string };
-
-  // v2
-  chantier_id?: string | null;
-  report_recipient_number?: string | null;
-  description_installateur?: string | null;
-  numero_serie?: string | null;
-  notes_sav?: string | null;
-
-  // NEW (sessions_updated.py)
-  notes_sav_items?: SessionSavItem[];
-
-  sender_numbers?: string[];
-  status?: string;
-
-  created_at?: number;
-  updated_at?: number;
-  last_published_at?: number | null;
-  last_published_by?: string | null;
-
-  photos?: SessionPhoto[];
-
-  photo_drafts?: Record<string, any>;
-
-  public_url?: string | null;
-  public_slug?: string | null;
-
-  [key: string]: any;
-};
-
-type Chantier = {
-  chantier_id: string;
-  status?: string;
-  title?: string;
-  created_at?: number;
-  updated_at?: number;
-
-  participants?: {
-    primary_sender_phone?: string | null;
-    known_phones?: string[];
-    report_recipient_phone?: string | null;
-  };
-
-  context?: {
-    reference_chantier?: string | null;
-    produit?: any;
-    numero_serie?: string | null;
-    installateur?: any;
-    description_installateur?: string | null;
-  };
-
-  outputs?: {
-    notes_sav?: any[]; // on stocke nos SavNote[]
-    note_sav_generale?: { text?: string; updated_at?: number };
-  };
-
-  links?: { session_ids?: string[] };
-
-  publication?: any;
-
-  [key: string]: any;
-};
-
-type ProductOption = { code: string; label: string };
-
-type Toast = { type: "success" | "error"; message: string };
-
-type SavNote = {
-  id: string; // stable note_id
-  title?: string; // optional
-  text: string;
-  photo_ids: string[];
-
-  // NEW: assets rattachés à la note (tech visuals, schémas…)
-  assets?: NoteAsset[];
-
-  updated_at?: number;
-  created_at?: number;
-};
-
-type SavItemResponse =
-  | {
-      kind: "chantier";
-      chantier_id: string;
-      chantier: Chantier;
-      sessions: SessionDetail[];
-      session_count: number;
-    }
-  | {
-      kind: "unattached_session";
-      chantier_id: null;
-      chantier: null;
-      sessions: SessionDetail[];
-      session_count: 1;
-    }
-  | { error: string };
-
-function formatTs(ts?: number | null) {
-  if (!ts) return "—";
+function get(obj: any, path: string, fallback?: any) {
   try {
-    return new Date(ts * 1000).toLocaleString("fr-FR");
-  } catch {
-    return String(ts);
-  }
-}
-
-function humanStatus(status?: string) {
-  if (!status) return "Nouveau";
-  return status;
-}
-
-function humanChantierStatus(status?: string) {
-  const s = (status || "").toUpperCase();
-  if (!s) return "À traiter";
-  if (s.includes("RESOL")) return "Résolu";
-  return "À traiter";
-}
-
-function uid(prefix = "n") {
-  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
-}
-
-function deepMerge<T extends Record<string, any>>(base: T, patch: any): T {
-  if (!patch || typeof patch !== "object") return base;
-  const out: any = Array.isArray(base) ? [...(base as any)] : { ...(base as any) };
-  for (const k of Object.keys(patch)) {
-    const pv = patch[k];
-    const bv = (base as any)?.[k];
-    if (pv && typeof pv === "object" && !Array.isArray(pv) && bv && typeof bv === "object" && !Array.isArray(bv)) {
-      out[k] = deepMerge(bv, pv);
-    } else {
-      out[k] = pv;
+    const parts = path.split(".");
+    let cur = obj;
+    for (const p of parts) {
+      if (cur == null) return fallback;
+      cur = cur[p];
     }
+    return cur === undefined ? fallback : cur;
+  } catch {
+    return fallback;
   }
-  return out as T;
 }
 
+function safeStr(v: any, fallback = ""): string {
+  if (v === null || v === undefined) return fallback;
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number") return String(v);
+  // ⚠️ si c'est un objet, on NE le stringifie pas (sinon [object Object])
+  return fallback;
+}
 
-// debounce helpers
-function useDebouncedCallback<T extends (...args: any[]) => void>(cb: T, delayMs: number) {
-  const t = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latest = useRef(cb);
-  latest.current = cb;
+function uniqStrings(values: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of values) {
+    const s = (v || "").trim();
+    if (!s) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+  }
+  return out;
+}
 
-  return useCallback(
-    (...args: Parameters<T>) => {
-      if (t.current) clearTimeout(t.current);
-      t.current = setTimeout(() => {
-        latest.current(...args);
-      }, delayMs);
-    },
-    [delayMs]
+function arraysEqualIgnoreOrder(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  const aa = [...a].map((x) => x.trim()).filter(Boolean).sort();
+  const bb = [...b].map((x) => x.trim()).filter(Boolean).sort();
+  for (let i = 0; i < aa.length; i++) {
+    if (aa[i] !== bb[i]) return false;
+  }
+  return true;
+}
+
+function Pill({
+  children,
+  tone = "warning",
+}: {
+  children: React.ReactNode;
+  tone?: "warning" | "neutral" | "success" | "info";
+}) {
+  const cls =
+    tone === "warning"
+      ? "bg-amber-50 text-amber-700 ring-1 ring-amber-200"
+      : tone === "success"
+        ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+        : tone === "info"
+          ? "bg-sky-50 text-sky-700 ring-1 ring-sky-200"
+          : "bg-neutral-100 text-neutral-700 ring-1 ring-neutral-200";
+  return (
+    <span
+      className={cx(
+        "inline-flex items-center rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap shrink-0",
+        cls,
+      )}
+    >
+      {children}
+    </span>
   );
 }
 
-function pickMostRecentSession(sessions: SessionDetail[]): SessionDetail | null {
-  if (!sessions || sessions.length === 0) return null;
-  const sorted = [...sessions].sort((a, b) => {
-    const au = typeof a.updated_at === "number" ? a.updated_at : 0;
-    const bu = typeof b.updated_at === "number" ? b.updated_at : 0;
-    if (bu !== au) return bu - au;
-    // fallback: created_at
-    const ac = typeof a.created_at === "number" ? a.created_at : 0;
-    const bc = typeof b.created_at === "number" ? b.created_at : 0;
-    return bc - ac;
-  });
-  return sorted[0] || null;
+function Button({
+  children,
+  variant = "outline",
+  className,
+  disabled,
+  onClick,
+}: {
+  children: React.ReactNode;
+  variant?: "outline" | "solid";
+  className?: string;
+  disabled?: boolean;
+  onClick?: () => void;
+}) {
+  const base =
+    "inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-neutral-300 disabled:opacity-50 disabled:cursor-not-allowed";
+  const styles =
+    variant === "solid"
+      ? "bg-neutral-900 text-white hover:bg-neutral-800"
+      : "bg-white text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50";
+  return (
+    <button
+      type="button"
+      className={cx(base, styles, className)}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
 }
 
-function buildChantierAggregatedPhotos(
-  sessions: SessionDetail[]
-): { photos: SessionPhoto[]; idMap: Record<string, { session_id: string; photo_id: string }> } {
-  const all: SessionPhoto[] = [];
-  const idMap: Record<string, { session_id: string; photo_id: string }> = {};
-
-  // tri sessions pour un ordre "humain" (par created_at puis updated_at)
-  const orderedSessions = [...sessions].sort((a, b) => {
-    const ac = typeof a.created_at === "number" ? a.created_at : 0;
-    const bc = typeof b.created_at === "number" ? b.created_at : 0;
-    if (ac !== bc) return ac - bc;
-    const au = typeof a.updated_at === "number" ? a.updated_at : 0;
-    const bu = typeof b.updated_at === "number" ? b.updated_at : 0;
-    return au - bu;
-  });
-
-  for (const s of orderedSessions) {
-    const sid = s.session_id;
-    const photos = (s.photos || []) as SessionPhoto[];
-    for (const p of photos) {
-      const pid = p.id;
-      if (!sid || !pid) continue;
-
-      const composite = `${sid}__${pid}`;
-
-      // si collision (très improbable) -> suffix
-      let finalId = composite;
-      let k = 2;
-      while (idMap[finalId]) {
-        finalId = `${composite}__${k++}`;
-      }
-
-      idMap[finalId] = { session_id: sid, photo_id: pid };
-      all.push({
-        ...p,
-        id: finalId,
-        __session_id: sid,
-        __photo_id: pid,
-      });
-    }
-  }
-
-  return { photos: all, idMap };
+function Card({
+  title,
+  right,
+  children,
+  className,
+}: {
+  title?: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <section
+      className={cx(
+        "rounded-2xl bg-white ring-1 ring-neutral-200 shadow-sm",
+        className,
+      )}
+    >
+      {(title || right) && (
+        <div className="flex items-center justify-between gap-3 border-b border-neutral-100 px-5 py-4">
+          {title ? (
+            <h2 className="text-base font-semibold text-neutral-900">{title}</h2>
+          ) : (
+            <div />
+          )}
+          {right}
+        </div>
+      )}
+      <div className="px-5 py-4">{children}</div>
+    </section>
+  );
 }
 
-function mergeAssetsFromBackendNotes(
-  localNotes: SavNote[],
-  backendItems: SessionSavItem[] | undefined,
-  sessionId: string
-): SavNote[] {
-  if (!backendItems || !Array.isArray(backendItems) || !sessionId) return localNotes;
-
-  const map: Record<string, NoteAsset[]> = {};
-  for (const it of backendItems) {
-    const nid = it?.note_id;
-    if (!nid) continue;
-
-    const assets = (it.assets || []).map((a) => {
-      const fallbackPath = `/sessions/${encodeURIComponent(sessionId)}/notes/${encodeURIComponent(
-        nid
-      )}/assets/${encodeURIComponent(a.asset_id)}`;
-
-      const normalizedUrl = a.asset_url
-        ? a.asset_url.startsWith("http://") || a.asset_url.startsWith("https://")
-          ? a.asset_url
-          : buildUrl(a.asset_url)
-        : buildUrl(fallbackPath);
-
-      return {
-        ...a,
-        asset_url: normalizedUrl,
-      };
-    });
-
-    map[nid] = assets;
-  }
-
-  return localNotes.map((n) => {
-    const backendAssets = map[n.id];
-    if (!backendAssets || backendAssets.length === 0) return n;
-
-    // merge stable by asset_id
-    const existing = new Map((n.assets || []).map((a) => [a.asset_id, a]));
-    for (const a of backendAssets) existing.set(a.asset_id, { ...existing.get(a.asset_id), ...a });
-
-    return { ...n, assets: Array.from(existing.values()) };
-  });
+function Field({ label, value }: { label: string; value: string }) {
+  // ✅ valeur vide = affichage vide (pas de "—")
+  return (
+    <div>
+      <div className="text-xs text-neutral-500">{label}</div>
+      <div className="mt-1 text-sm font-medium text-neutral-900">{value}</div>
+    </div>
+  );
 }
 
-export default function SavSessionDetailPage() {
-  const params = useParams() as { sessions_id?: string | string[] };
+function FakeSelect({ value }: { value: string }) {
+  return (
+    <div className="flex h-10 items-center justify-between rounded-xl bg-neutral-50 px-3 text-sm text-neutral-900 ring-1 ring-neutral-200">
+      <span>{value}</span>
+      <span className="text-neutral-400">▾</span>
+    </div>
+  );
+}
 
-  const rawKey = Array.isArray(params.sessions_id)
-    ? params.sessions_id[0]
-    : params.sessions_id;
+function FakeInput({
+  placeholder,
+  value,
+}: {
+  placeholder: string;
+  value?: string;
+}) {
+  return (
+    <div className="flex h-10 items-center rounded-xl bg-white px-3 text-sm text-neutral-900 ring-1 ring-neutral-200">
+      <span className={value ? "text-neutral-900" : "text-neutral-400"}>
+        {value || placeholder}
+      </span>
+    </div>
+  );
+}
 
-  const key = rawKey ? decodeURIComponent(rawKey) : "";
+type UiSavSession = {
+  id: string;
+  code: string;
+  dateLabel: string;
+  category: string;
+  subCategory: string;
+  symptom: string;
+  statusLabel: string;
+};
 
-  // This is the ACTUAL loaded session_id (can differ from URL key if URL key is chantier_id)
-  const [loadedSessionId, setLoadedSessionId] = useState<string>("");
+type UiSavNote = {
+  id: string;
+  target: string;   // ex: "Commercial", "Installateur", "Interne", ...
+  channel: string;  // ex: "Email", "WhatsApp", "—"
+  status: string;   // ex: "Brouillon", "Envoyé", "Échec"
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+};
 
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
+function normalizeNoteTarget(raw: any): string {
+  const s = safeStr(raw, "");
+  if (!s) return "—";
+  if (s === "INSTALLATEUR") return "Installateur";
+  if (s === "COMMERCIAL") return "Commercial";
+  if (s === "QUALITE") return "Qualité";
+  if (s === "BUREAU_ETUDES") return "Bureau d'études";
+  if (s === "DIRECTION") return "Direction";
+  if (s === "INTERNE") return "Interne";
+  return s;
+}
 
-  // NEW: chantier payload (source-of-truth si kind=chantier)
-  const [chantier, setChantier] = useState<Chantier | null>(null);
+function normalizeNoteChannel(raw: any): string {
+  const s = safeStr(raw, "");
+  if (!s || s === "NONE") return "—";
+  if (s === "EMAIL") return "Email";
+  if (s === "WHATSAPP") return "WhatsApp";
+  return s;
+}
 
-  const [chantierMeta, setChantierMeta] = useState<{
-    kind: "chantier" | "unattached_session" | null;
-    chantier_id: string | null;
-    session_count: number;
-    session_ids: string[];
-  }>({ kind: null, chantier_id: null, session_count: 0, session_ids: [] });
+function normalizeNoteStatus(raw: any): string {
+  const s = safeStr(raw, "");
+  if (!s) return "Brouillon";
+  if (s === "DRAFT") return "Brouillon";
+  if (s === "SENT") return "Envoyé";
+  if (s === "FAILED") return "Échec";
+  return s;
+}
 
-  // NEW: chantier multi-sessions photo mapping (UI ids -> backend ids)
-  const [chantierPhotoIdMap, setChantierPhotoIdMap] = useState<
-    Record<string, { session_id: string; photo_id: string }>
-  >({});
+function normalizeNoteStatusCode(raw: any): "DRAFT" | "SENT" | "FAILED" {
+  const s = safeStr(raw, "").toUpperCase();
+  if (s === "SENT") return "SENT";
+  if (s === "FAILED") return "FAILED";
+  return "DRAFT";
+}
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+function noteStatusTone(code: "DRAFT" | "SENT" | "FAILED"): "neutral" | "success" | "warning" {
+  if (code === "SENT") return "success";
+  if (code === "FAILED") return "warning";
+  return "neutral";
+}
 
-  const [toast, setToast] = useState<Toast | null>(null);
-
-  // ✅ current user (stored in localStorage)
-  const [currentUser, setCurrentUser] = useState<string>("Xavier Briffa");
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(CURRENT_USER_STORAGE_KEY);
-      if (raw && typeof raw === "string" && raw.trim()) setCurrentUser(raw.trim());
-    } catch {
-      // ignore
-    }
-  }, []);
-  const persistCurrentUser = (u: string) => {
-    setCurrentUser(u);
-    try {
-      localStorage.setItem(CURRENT_USER_STORAGE_KEY, u);
-    } catch {
-      // ignore
-    }
+function pickMostRecentNoteId(notes: UiSavNote[]): string {
+  if (!notes.length) return "";
+  const score = (n: UiSavNote) => {
+    // on privilégie updatedAt, puis createdAt
+    const t =
+      Date.parse(n.updatedAt) ||
+      Date.parse(n.createdAt) ||
+      0;
+    return Number.isFinite(t) ? t : 0;
   };
+  const sorted = [...notes].sort((a, b) => score(b) - score(a));
+  return sorted[0]?.id || "";
+}
+
+function statusTone(statusLabel: string): "warning" | "neutral" | "success" | "info" {
+  const s = (statusLabel || "").toLowerCase();
+  if (s.includes("résolu") || s.includes("resolu")) return "success";
+  if (s.includes("interne")) return "warning";
+  if (s.includes("installateur")) return "info";
+  return "neutral";
+}
+
+function normalizeStatusLabel(raw: any): string {
+  const s = safeStr(raw, "");
+  if (!s) return "A traiter";
+  if (s === "A_TRAITER") return "A traiter";
+  if (s === "EN_ATTENTE_INTERNE") return "En attente interne";
+  if (s === "EN_ATTENTE_INSTALLATEUR") return "En attente installateur";
+  if (s === "RESOLU") return "Résolu";
+  return s;
+}
+
+function normalizeStatusCode(raw: any): string {
+  const s = safeStr(raw, "").toUpperCase();
+  if (s === "EN_ATTENTE_INTERNE") return "EN_ATTENTE_INTERNE";
+  if (s === "EN_ATTENTE_INSTALLATEUR") return "EN_ATTENTE_INSTALLATEUR";
+  if (s === "RESOLU") return "RESOLU";
+  return "A_TRAITER";
+}
+
+const SAV_STATUS_OPTIONS = [
+  { value: "A_TRAITER", label: "A traiter" },
+  { value: "EN_ATTENTE_INTERNE", label: "En attente interne" },
+  { value: "EN_ATTENTE_INSTALLATEUR", label: "En attente installateur" },
+  { value: "RESOLU", label: "Résolu" },
+] as const;
+
+function formatHumanDate(value: any): string {
+  if (value === null || value === undefined) return "";
+
+  // number (epoch seconds)
+  if (typeof value === "number" && isFinite(value)) {
+    const d = new Date(value * 1000);
+    return d.toLocaleString("fr-FR", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  // numeric string (epoch seconds)
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return "";
+
+    const asNum = Number(s);
+    if (!Number.isNaN(asNum) && isFinite(asNum)) {
+      const d = new Date(asNum * 1000);
+      return d.toLocaleString("fr-FR", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    }
+
+    // ISO / date-like
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleString("fr-FR", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    }
+
+    // fallback: keep short
+    return s.slice(0, 16);
+  }
+
+  return "";
+}
+
+function SessionsListItem({
+  session,
+  isSelected,
+  isEditing,
+  onClick,
+  onStartEdit,
+  onStopEdit,
+  displayName,
+  onRename,
+  onCommitName,
+}: {
+  session: UiSavSession;
+  isSelected: boolean;
+  isEditing: boolean;
+  onClick: () => void;
+  onStartEdit: () => void;
+  onStopEdit: () => void;
+  displayName: string;
+  onRename: (name: string) => void;
+  onCommitName: () => void;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => {
+        onStopEdit();
+        onClick();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onStopEdit();
+          onClick();
+        }
+      }}
+      className={cx(
+        "w-full rounded-2xl p-4 text-left ring-1 transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-neutral-300",
+        isSelected
+          ? "bg-indigo-50 ring-indigo-200"
+          : "bg-white ring-neutral-200 hover:bg-neutral-50",
+      )}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold text-neutral-900 min-w-0">
+          {isSelected && isEditing ? (
+            <input
+              className="w-full rounded-lg bg-white px-2 py-1 text-sm font-semibold text-neutral-900 ring-1 ring-neutral-200"
+              value={displayName}
+              placeholder={session.code}
+              autoFocus
+              onChange={(e) => onRename(e.target.value)}
+              onMouseDown={(e) => e.stopPropagation()} // ✅ empêche le click outside global
+              onClick={(e) => e.stopPropagation()}
+              onBlur={() => {
+                onCommitName();
+                onStopEdit(); // ✅ clic ailleurs => blur => exit rename
+              }}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  onCommitName();
+                  onStopEdit();
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  onStopEdit();
+                }
+              }}
+            />
+          ) : (
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="truncate">
+                {displayName?.trim() ? displayName : session.code}
+              </span>
+
+              {/* bouton renommer visible seulement quand la session est sélectionnée */}
+              {isSelected ? (
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md bg-white/70 px-2 py-1 text-xs text-neutral-700 ring-1 ring-neutral-200 hover:bg-white"
+                  title="Renommer"
+                  onMouseDown={(e) => e.stopPropagation()} // ✅ empêche le click outside global
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onStartEdit();
+                  }}
+                >
+                  ✎
+                </button>
+              ) : null}
+            </div>
+          )}
+
+          {/* meta (date/cat) */}
+          {!isSelected && (
+            <>
+              {session.dateLabel ? ` · ${session.dateLabel}` : ""}
+              {session.category ? ` · ${session.category}` : ""}
+            </>
+          )}
+        </div>
+        <Pill tone={statusTone(session.statusLabel)}>{session.statusLabel}</Pill>
+      </div>
+
+      {(session.subCategory || session.symptom) && (
+        <div className="mt-1 text-sm text-neutral-700">
+          {session.subCategory}
+          {session.subCategory && session.symptom ? " · " : ""}
+          {session.symptom ? `Symptôme: ${session.symptom}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** CRM result type from internal_api.py */
+type CrmCandidate = {
+  name: string;
+  company: string;
+  email: string;
+  phone: string;
+  display: string;
+};
+
+/** Product option from internal_api.py GET /products */
+type ProductOption = {
+  code: string;
+  label: string;
+};
+
+type AiImproveMeta = {
+  model?: string | null;
+  target?: string | null;
+  channel?: string | null;
+  used_ai?: boolean;
+};
+
+type AiImproveResult = {
+  can_generate: boolean;
+  severity: "ok" | "warning" | "blocked_for_ai" | string;
+  suggested_subject?: string | null;
+  suggested_body?: string | null;
+  warnings: string[];
+  missing_info: string[];
+  explanation: string;
+  meta?: AiImproveMeta;
+};
+
+type AiImproveResponse = {
+  ok: boolean;
+  result: AiImproveResult;
+};
 
 
-  // keep legacy "author" in sync (publish metadata)
+export default function ChantierDetailPage() {
+  // ✅ route param robuste (sessions_id / chantier_id / key / etc.)
+  const params = useParams() as Record<string, string | string[] | undefined>;
+  const router = useRouter();
+
+  const rawKey =
+    (typeof params?.key === "string" && params.key) ||
+    (typeof params?.sessions_id === "string" && params.sessions_id) ||
+    (typeof params?.session_id === "string" && params.session_id) ||
+    (typeof params?.chantier_id === "string" && params.chantier_id) ||
+    (typeof params?.id === "string" && params.id) ||
+    (Object.values(params).find((v) => typeof v === "string") as
+      | string
+      | undefined) ||
+    "";
+
+  // IMPORTANT: Next peut te donner un segment déjà encodé (ex: "54%20avenue...").
+  // Si on re-encode derrière => "%25" => 404 côté backend.
+  const key = (() => {
+    try {
+      return decodeURIComponent(rawKey);
+    } catch {
+      return rawKey;
+    }
+  })();
+
+  const sessionNamesStorageKey = useMemo(() => {
+    // clé stable par chantier
+    return `chantier_${key}_sav_session_names_v1`;
+  }, [key]);
+
+  const [sessionNames, setSessionNames] = useState<Record<string, string>>({});
+
   useEffect(() => {
-    setAuthor(currentUser);
-  }, [currentUser]);
-
-
-  // Actions
-  const [author, setAuthor] = useState<string>("Xavier Briffa");
-  const [publishing, setPublishing] = useState(false);
-
-  // Inputs selection
-  const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
-  const [includeMap, setIncludeMap] = useState<Record<string, boolean>>({});
-
-  // Meta fields (editable)
-  const [reportRecipient, setReportRecipient] = useState<string>("");
-  const [descriptionInstallateur, setDescriptionInstallateur] = useState<string>("");
-  const [numeroSerie, setNumeroSerie] = useState<string>("");
-
-  // Contexte chantier (editable via toggle)
-  const [isEditingContext, setIsEditingContext] = useState(false);
-
-  const [draftInstallerName, setDraftInstallerName] = useState("");
-  const [draftInstallerCompany, setDraftInstallerCompany] = useState("");
-  const [draftInstallerPhone, setDraftInstallerPhone] = useState("");
-
-  const [draftReferenceChantier, setDraftReferenceChantier] = useState("");
-  const [draftProductCode, setDraftProductCode] = useState<string>("");
-
-  // CRM search (top 5)
-  const [crmQuery, setCrmQuery] = useState("");
-  const [crmResults, setCrmResults] = useState<any[]>([]);
-  const [crmLoading, setCrmLoading] = useState(false);
-
-  // Products list (normée)
-  const [products, setProducts] = useState<ProductOption[]>([]);
-
-  // Notes SAV (outputs)
-  const [notes, setNotes] = useState<SavNote[]>([]);
-  const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
-
-  const [noteText, setNoteText] = useState("");
-  const [notePhotos, setNotePhotos] = useState<string[]>([]);
-  const [uploadingVisual, setUploadingVisual] = useState(false);
-
-  // ✅ NEW: quel visuel est sélectionné pour l’aperçu (par note)
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
-
-  // Optional global note (separate from notes list)
-  const [globalSavNote, setGlobalSavNote] = useState<string>("");
-
-  // Fullscreen viewer
-  const [fullscreen, setFullscreen] = useState<{
-    kind: "photo" | "note_visual";
-    photoUrl: string;
-    title: string;
-  } | null>(null);
-
-  // Auto-hide toast
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 3000);
-    return () => clearTimeout(t);
-  }, [toast]);
-
-  // Load products (for dropdown)
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(buildUrl("/products"));
-        if (!res.ok) return;
-        const data = await res.json();
-        if (cancelled) return;
-        const list: ProductOption[] = Array.isArray(data)
-          ? data
-              .map((p: any) => ({ code: String(p.code || ""), label: String(p.label || p.code || "") }))
-              .filter((p: any) => p.code)
-          : [];
-        setProducts(list);
-      } catch {
-        // ignore (dropdown can fallback to free text later)
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-
-  const photos: SessionPhoto[] = useMemo(() => detail?.photos || [], [detail]);
-
-  const selectedPhoto = useMemo(() => {
-    if (!photos.length) return null;
-    const pid = selectedPhotoId || photos[0].id;
-    return photos.find((p) => p.id === pid) || photos[0];
-  }, [photos, selectedPhotoId]);
-
-  const includedPhotoIds = useMemo(() => {
-    const ids = photos.map((p) => p.id);
-    return ids.filter((id) => includeMap[id] !== false);
-  }, [photos, includeMap]);
-
-  // chips: we show included photos, click to preview
-  const previewChips = includedPhotoIds;
-
-  const isMultiSessionChantier = useMemo(() => {
-    return chantierMeta.kind === "chantier" && (chantierMeta.session_count || 0) > 1;
-  }, [chantierMeta]);
-
-  const isChantierMode = chantierMeta.kind === "chantier" && Boolean(chantierMeta.chantier_id);
-
-
-
-  
-  const reload = useCallback(async () => {
     if (!key) return;
     try {
-      const res = await fetch(buildUrl(`/sav/item/${encodeURIComponent(key)}`));
-      if (!res.ok) return;
-      const data = (await res.json()) as SavItemResponse;
-      if ((data as any)?.error) return;
+      const raw = localStorage.getItem(sessionNamesStorageKey);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (obj && typeof obj === "object") setSessionNames(obj);
+      }
+    } catch {}
+  }, [key, sessionNamesStorageKey]);
 
-      const sessions = (data as any).sessions as SessionDetail[];
-      const kind = (data as any).kind as "chantier" | "unattached_session";
-      const chantierId = (data as any).chantier_id ?? null;
-      const chantierObj = (data as any).chantier ?? null;
-
-      setChantierMeta({
-        kind,
-        chantier_id: chantierId,
-        session_count: (data as any).session_count ?? sessions.length,
-        session_ids: sessions.map((s) => s.session_id).filter(Boolean),
-      });
-
-      if (kind === "chantier") setChantier(chantierObj as Chantier);
-      else setChantier(null);
-
-      const most = pickMostRecentSession(sessions) || sessions[0];
-      setDetail(most);
-      setLoadedSessionId(most?.session_id || "");
-    } catch (e) {
-      console.error("reload error", e);
-    }
-  }, [key]);
-
-// --- Load (UNIFIED): /sav/item/{key} ---
   useEffect(() => {
+    if (!key) return;
+    try {
+      localStorage.setItem(sessionNamesStorageKey, JSON.stringify(sessionNames));
+    } catch {}
+  }, [key, sessionNamesStorageKey, sessionNames]);
+
+  // IMPORTANT: pas de trim ici sinon tu “perds” les espaces pendant la saisie
+  function setSessionDisplayName(savSessionId: string, name: string) {
+    const val = name ?? "";
+    setSessionNames((prev) => ({ ...prev, [savSessionId]: val }));
+  }
+
+  // Si tu veux “nettoyer” (trim) => on le fait sur blur / enter, pas onChange
+  function commitSessionDisplayName(savSessionId: string) {
+    setSessionNames((prev) => {
+      const current = prev[savSessionId] ?? "";
+      const cleaned = current.replace(/\s+/g, " ").trim(); // garde les espaces entre mots
+      return { ...prev, [savSessionId]: cleaned };
+    });
+  }
+
+  // ✅ API_BASE compat ancien code
+  const API_BASE = useMemo(() => {
+    const v =
+      process.env.NEXT_PUBLIC_INTERNAL_API_BASE_URL ||
+      process.env.NEXT_PUBLIC_INTERNAL_API ||
+      "http://localhost:8001";
+    return String(v).replace(/\/$/, "");
+  }, []);
+
+  // ---------------------------
+  // Patch D — Produit connecté (GET /products + PATCH context.produit)
+  // ---------------------------
+  const [products, setProducts] = useState<ProductOption[]>([]);
+  const [productsLoading, setProductsLoading] = useState<boolean>(false);
+  const [productsError, setProductsError] = useState<string | null>(null);
+
+  // ---------------------------
+  // Catalogue classification (catégories / sous-catégories)
+  // ---------------------------
+  const [catalogClassification, setCatalogClassification] = useState<{
+    categories: { code: string; label: string }[];
+    sub_categories: { code: string; label: string }[];
+  } | null>(null);
+
+  const [catalogClassificationError, setCatalogClassificationError] = useState<string | null>(null);
+
+  const fetchCatalogClassification = useCallback(async () => {
+    setCatalogClassificationError(null);
+    try {
+      const res = await fetch(`${API_BASE}/catalog/classification`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+
+      const categories = Array.isArray(json?.categories) ? json.categories : [];
+      const sub_categories = Array.isArray(json?.sub_categories) ? json.sub_categories : [];
+
+      setCatalogClassification({ categories, sub_categories });
+    } catch (e: any) {
+      setCatalogClassification(null);
+      setCatalogClassificationError(e?.message || "Erreur catalogue classification");
+    }
+  }, [API_BASE]);
+
+  const fetchProducts = useCallback(async () => {
+    setProductsLoading(true);
+    setProductsError(null);
+    try {
+      const url = `${API_BASE}/products`;
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          `Erreur API /products: HTTP ${res.status} — ${txt.slice(0, 160)}`,
+        );
+      }
+      const json = (await res.json()) as any[];
+      const opts: ProductOption[] = Array.isArray(json)
+        ? json
+            .map((p) => ({
+              code: safeStr(p?.code, ""),
+              label: safeStr(p?.label, ""),
+            }))
+            .filter((p) => p.code && p.label)
+        : [];
+      setProducts(opts);
+    } catch (e: any) {
+      setProductsError(e?.message || "Erreur /products inconnue");
+      setProducts([]);
+    } finally {
+      setProductsLoading(false);
+    }
+  }, [API_BASE]);
+
+  useEffect(() => {
+    void fetchProducts();
+  }, [fetchProducts]);
+
+  useEffect(() => {
+    fetchCatalogClassification();
+  }, [fetchCatalogClassification]);
+
+  const [debugOpen, setDebugOpen] = useState(false);
+
+  const [currentUser, setCurrentUser] = useState<UserName>("William Perge");
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(CURRENT_USER_STORAGE_KEY) as UserName;
+      if (saved && USERS.includes(saved)) setCurrentUser(saved);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(CURRENT_USER_STORAGE_KEY, currentUser);
+    } catch {}
+  }, [currentUser]);
+
+  // Data load state
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [data, setData] = useState<any>(null);
+
+  const fetchSavItem = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
     if (!key) {
+      setData(null);
       setLoading(false);
-      setError("Paramètre sessions_id manquant dans l’URL.");
+      setError("URL invalide: key manquant dans la route.");
       return;
     }
 
-    let cancelled = false;
+    try {
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(key)}`;
+      const res = await fetch(url, { cache: "no-store" });
 
-    (async () => {
-      setLoading(true);
-      setError(null);
-
-      setDetail(null);
-      setChantier(null);
-      setLoadedSessionId("");
-      setChantierMeta({ kind: null, chantier_id: null, session_count: 0, session_ids: [] });
-
-      setChantierPhotoIdMap({});
-      setIncludeMap({});
-      setSelectedPhotoId(null);
-
-      try {
-        const res = await fetch(buildUrl(`/sav/item/${encodeURIComponent(key)}`));
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`Erreur API (${res.status}) : ${txt || "Impossible de charger"}`);
-        }
-
-        const data = (await res.json()) as SavItemResponse;
-
-        if ((data as any)?.error) {
-          throw new Error(`Introuvable (${key}).`);
-        }
-
-        if (cancelled) return;
-
-        const sessions = (data as any).sessions as SessionDetail[];
-        if (!sessions || sessions.length === 0) {
-          throw new Error("Aucune session trouvée pour cette référence.");
-        }
-
-        const kind = (data as any).kind as "chantier" | "unattached_session";
-        const chantierId = (data as any).chantier_id ?? null;
-        const chantierObj = (data as any).chantier ?? null;
-
-        setChantierMeta({
-          kind,
-          chantier_id: chantierId,
-          session_count: (data as any).session_count ?? sessions.length,
-          session_ids: sessions.map((s) => s.session_id).filter(Boolean),
-        });
-
-        if (kind === "chantier") {
-          setChantier(chantierObj as Chantier);
-        }
-
-        // session “pilote” = la plus récente (sert pour publish, drafts, assets endpoints etc.)
-        const chosen = pickMostRecentSession(sessions) || sessions[0];
-        if (!chosen || !chosen.session_id) {
-          throw new Error("Session pilote introuvable.");
-        }
-
-        // Photos: si chantier -> agrégation multi-sessions
-        let finalDetail: SessionDetail = chosen;
-        let finalPhotos = (chosen.photos || []) as SessionPhoto[];
-        let idMap: Record<string, { session_id: string; photo_id: string }> = {};
-
-        if (kind === "chantier" && sessions.length >= 1) {
-          const agg = buildChantierAggregatedPhotos(sessions);
-          finalPhotos = agg.photos;
-          idMap = agg.idMap;
-
-          finalDetail = {
-            ...chosen,
-            photos: finalPhotos,
-          };
-        }
-
-        setDetail(finalDetail);
-        setLoadedSessionId(chosen.session_id);
-        setChantierPhotoIdMap(idMap);
-
-        if (finalPhotos.length) {
-          setSelectedPhotoId((prev) => prev || finalPhotos[0].id);
-        }
-
-        // init includeMap:
-        const backendDrafts = (chosen as any).photo_drafts || {};
-        const nextInclude: Record<string, boolean> = {};
-        for (const ph of finalPhotos) {
-          const originalPhotoId = ph.__photo_id || ph.id;
-          const originSessionId = ph.__session_id || chosen.session_id;
-
-          if (originSessionId === chosen.session_id) {
-            const d = backendDrafts[originalPhotoId] || {};
-            if (typeof d.include_in_report === "boolean") nextInclude[ph.id] = d.include_in_report;
-            else nextInclude[ph.id] = true;
-          } else {
-            // pour les autres sessions: MVP = inclure par défaut
-            nextInclude[ph.id] = true;
-          }
-        }
-        setIncludeMap(nextInclude);
-
-        // ---------------------------------------------------------
-        // Init META fields (source-of-truth chantier si applicable)
-        // ---------------------------------------------------------
-        const defaultRecipientFromSession =
-          (chosen.report_recipient_number || "").trim() ||
-          (chosen.installateur?.user_id || "").trim() ||
-          ((chosen.sender_numbers || [])[0] || "").trim();
-
-        const chantierRecipient =
-          kind === "chantier"
-            ? ((chantierObj as any)?.participants?.report_recipient_phone || "").toString().trim()
-            : "";
-
-        const chantierDesc =
-          kind === "chantier"
-            ? ((chantierObj as any)?.context?.description_installateur || "").toString()
-            : "";
-
-        const chantierSerie =
-          kind === "chantier"
-            ? ((chantierObj as any)?.context?.numero_serie || "").toString()
-            : "";
-
-        setReportRecipient(chantierRecipient || defaultRecipientFromSession);
-        setDescriptionInstallateur(
-          kind === "chantier"
-            ? chantierDesc
-            : (chosen.description_installateur || "").toString()
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          `Erreur API /chantiers/{id}: HTTP ${res.status} — ${txt.slice(0, 220)}`,
         );
-        setNumeroSerie(
-          kind === "chantier"
-            ? chantierSerie
-            : (chosen.numero_serie || "").toString()
-        );
-
-        // ---------------------------------------------------------
-        // Notes SAV + note générale (chantier si applicable)
-        // ---------------------------------------------------------
-        let parsedNotes: SavNote[] = [];
-        let parsedGlobal = "";
-
-        if (kind === "chantier") {
-          const outNotes = ((chantierObj as any)?.outputs?.notes_sav || []) as any[];
-          if (Array.isArray(outNotes)) parsedNotes = outNotes as SavNote[];
-
-          const g = (chantierObj as any)?.outputs?.note_sav_generale?.text;
-          if (typeof g === "string") parsedGlobal = g;
-        } else {
-          // legacy session storage
-          const rawNotes = chosen.notes_sav;
-          if (rawNotes && rawNotes.trim()) {
-            try {
-              const obj = JSON.parse(rawNotes);
-              if (Array.isArray(obj)) {
-                parsedNotes = obj as SavNote[];
-              } else if (obj && typeof obj === "object") {
-                if (Array.isArray((obj as any).notes)) parsedNotes = (obj as any).notes;
-                if (typeof (obj as any).global === "string") parsedGlobal = (obj as any).global;
-              } else {
-                parsedGlobal = rawNotes;
-              }
-            } catch {
-              parsedGlobal = rawNotes;
-            }
-          }
-
-          // merge backend note assets (session-only)
-          parsedNotes = mergeAssetsFromBackendNotes(
-            parsedNotes,
-            (chosen as any).notes_sav_items,
-            chosen.session_id
-          );
-        }
-
-        setNotes(parsedNotes);
-        setGlobalSavNote(parsedGlobal);
-      } catch (e: any) {
-        if (cancelled) return;
-        setError(e?.message || "Erreur inattendue");
-      } finally {
-        if (!cancelled) setLoading(false);
       }
-    })();
 
-    return () => {
-      cancelled = true;
+      const json = await res.json();
+
+      // On garde le même shape "data.chantier" que le reste du fichier attend déjà
+      setData({ kind: "chantier", chantier: json });
+    } catch (e: any) {
+      setError(e?.message || "Erreur inconnue");
+    } finally {
+      setLoading(false);
+    }
+  }, [API_BASE, key]);
+
+  useEffect(() => {
+    void fetchSavItem();
+  }, [fetchSavItem]);
+
+  const kind = get(data, "kind", null);
+  const chantier = get(data, "chantier", null);
+
+  // ✅ Chantier stable mapping (format Glass/Mat)
+  const chantierTitle =
+    safeStr(get(chantier, "title", ""), "") ||
+    safeStr(get(chantier, "context.reference_chantier", ""), "") ||
+    safeStr(get(chantier, "context.nom_chantier", ""), "");
+
+  const referenceChantierFromData =
+    safeStr(get(chantier, "context.reference_chantier", ""), "") ||
+    safeStr(get(chantier, "title", ""), "") ||
+    safeStr(get(chantier, "context.nom_chantier", ""), "");
+
+  const numeroSerieFromData =
+    safeStr(get(chantier, "context.numero_serie", ""), "") ||
+    safeStr(get(chantier, "stable.numero_serie", ""), "");
+
+  const [referenceChantier, setReferenceChantier] = useState<string>("");
+
+  useEffect(() => {
+    setReferenceChantier(referenceChantierFromData);
+  }, [referenceChantierFromData]);
+
+  const [numeroSerie, setNumeroSerie] = useState<string>("");
+
+  useEffect(() => {
+    setNumeroSerie(numeroSerieFromData);
+  }, [numeroSerieFromData]);
+
+  const produitRaw = safeStr(get(chantier, "context.produit", ""), "");
+
+  const instCompany = safeStr(
+    get(chantier, "context.installateur.company", ""),
+    "",
+  );
+  const instName = safeStr(get(chantier, "context.installateur.name", ""), "");
+  const instEmail = safeStr(get(chantier, "context.installateur.email", ""), "");
+  const instPhone = safeStr(get(chantier, "context.installateur.phone", ""), "");
+
+  const [installateurEmail, setInstallateurEmail] = useState<string>("");
+  const [installateurPhone, setInstallateurPhone] = useState<string>("");
+
+  useEffect(() => {
+    setInstallateurEmail(instEmail);
+  }, [instEmail]);
+
+  useEffect(() => {
+    setInstallateurPhone(instPhone);
+  }, [instPhone]);
+
+  const [installateurEmailSaving, setInstallateurEmailSaving] = useState(false);
+  const [installateurEmailError, setInstallateurEmailError] = useState<string | null>(null);
+
+  const [installateurPhoneSaving, setInstallateurPhoneSaving] = useState(false);
+  const [installateurPhoneError, setInstallateurPhoneError] = useState<string | null>(null);
+
+  // Produit: on stocke de préférence le "code" (ex: optipellet),
+  // mais on accepte aussi qu'un ancien chantier ait stocké le label (ex: OptiPellet).
+  const [productCode, setProductCode] = useState<string>("");
+
+  // Init productCode quand on a chantier + products
+  useEffect(() => {
+    if (!chantier) return;
+    if (!products.length) return;
+
+    const raw = (produitRaw || "").trim();
+    if (!raw) {
+      setProductCode("");
+      return;
+    }
+
+    // Match par code (exact / case-insensitive)
+    const byCode =
+      products.find((p) => p.code === raw) ||
+      products.find((p) => p.code.toLowerCase() === raw.toLowerCase());
+
+    if (byCode) {
+      setProductCode(byCode.code);
+      return;
+    }
+
+    // Match par label (exact / case-insensitive)
+    const byLabel =
+      products.find((p) => p.label === raw) ||
+      products.find((p) => p.label.toLowerCase() === raw.toLowerCase());
+
+    if (byLabel) {
+      setProductCode(byLabel.code);
+      return;
+    }
+
+    // Unknown => keep raw (but UI select won't match)
+    setProductCode(raw);
+  }, [chantier, products, produitRaw]);
+
+  const selectedProductLabel = useMemo(() => {
+    if (!productCode) return "";
+    const p =
+      products.find((x) => x.code === productCode) ||
+      products.find((x) => x.label === productCode);
+    return p?.label || "";
+  }, [productCode, products]);
+
+  // Pour ton besoin UI:
+  // - "Installateur" = société si dispo, sinon vide
+  // - "Contact" = nom de personne si dispo, sinon vide
+  const installateurLabel = instCompany;
+  const contactLabel = instName;
+
+  // Sessions SAV (métier)
+  const savSessionsRaw = (get(chantier, "sav.sav_sessions", []) || []) as any[];
+  const activeSavSessionId = safeStr(
+    get(chantier, "sav.active_sav_session_id", ""),
+    "",
+  );
+
+  const uiSessions = useMemo<UiSavSession[]>(() => {
+    if (!Array.isArray(savSessionsRaw)) return [];
+
+    return savSessionsRaw.map((s: any, idx: number) => {
+      const id =
+        safeStr(get(s, "sav_session_id", ""), "") ||
+        safeStr(get(s, "id", ""), "") ||
+        `idx-${idx}`;
+
+      const code =
+        safeStr(get(s, "sav_session_id", ""), "") ||
+        safeStr(get(s, "code", ""), "") ||
+        `SAV-${idx + 1}`;
+
+      const dateLabelRaw =
+        safeStr(get(s, "date_label", ""), "") ||
+        safeStr(get(s, "date", ""), "") ||
+        safeStr(get(s, "created_at", ""), "");
+
+      const category =
+        safeStr(get(s, "classification.category", ""), "") ||
+        safeStr(get(s, "category", ""), "");
+
+      const subCategory =
+        safeStr(get(s, "classification.sub_category", ""), "") ||
+        safeStr(get(s, "classification.subCategory", ""), "") ||
+        safeStr(get(s, "sub_category", ""), "");
+
+      const symptom =
+        safeStr(get(s, "classification.symptom", ""), "") ||
+        safeStr(get(s, "symptom", ""), "");
+
+      const statusLabel = normalizeStatusLabel(get(s, "status", null));
+      const createdAt = get(s, "created_at", null);
+      const updatedAt = get(s, "updated_at", null);
+
+      // priorité: created_at (epoch) sinon updated_at sinon date_label/date
+      const dateLabel =
+        formatHumanDate(createdAt) ||
+        formatHumanDate(updatedAt) ||
+        formatHumanDate(dateLabelRaw) ||
+        "";
+
+      return { id, code, dateLabel, category, subCategory, symptom, statusLabel };
+    });
+  }, [savSessionsRaw]);
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [creatingSavSession, setCreatingSavSession] = useState(false);
+  const [createSavSessionError, setCreateSavSessionError] = useState<string | null>(null);
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [statusSaveError, setStatusSaveError] = useState<string | null>(null);
+  const [previewInstallateurLoading, setPreviewInstallateurLoading] = useState(false);
+
+  useEffect(() => {
+    const onDown = () => setEditingSessionId(null);
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, []);
+
+  useEffect(() => {
+    if (!uiSessions.length) {
+      setSelectedId(null);
+      return;
+    }
+
+    setSelectedId((prev) => {
+      // 1) si l’utilisateur a déjà sélectionné une session et qu’elle existe encore -> on garde
+      if (prev && uiSessions.some((s) => s.id === prev)) return prev;
+
+      // 2) sinon on prend l'active du backend si elle existe
+      if (activeSavSessionId && uiSessions.some((s) => s.id === activeSavSessionId)) {
+        return activeSavSessionId;
+      }
+
+      // 3) fallback: première
+      return uiSessions[0].id;
+    });
+  }, [uiSessions, activeSavSessionId]);
+
+  useEffect(() => {
+    setActiveNoteId("");
+    setNoteDirty(false);
+    setNoteSaveState("idle");
+    setNoteSaveError(null);
+    setNotePublishState("idle");
+    setNotePublishError(null);
+
+    setAiState("idle");
+    setAiError(null);
+    setAiSuggestion(null);
+    setAiSourceText("");
+  }, [selectedId]);
+
+  const selected = useMemo(() => {
+    if (!uiSessions.length) return null;
+    return uiSessions.find((s) => s.id === selectedId) || uiSessions[0];
+  }, [uiSessions, selectedId]);
+
+  // Raw session (objet original) pour accéder aux champs complets (components, etc.)
+  const selectedRaw = useMemo(() => {
+    if (!Array.isArray(savSessionsRaw) || !selectedId) return null;
+    const found =
+      savSessionsRaw.find(
+        (s: any) => safeStr(get(s, "sav_session_id", ""), "") === selectedId,
+      ) ||
+      savSessionsRaw.find((s: any) => safeStr(get(s, "id", ""), "") === selectedId);
+    return found || null;
+  }, [savSessionsRaw, selectedId]);
+
+  // ---------------------------
+  // Étape 4.1 — Active session + notes
+  // ---------------------------
+
+  // 1) active session raw
+  const currentSessionRaw = selectedRaw;
+
+  const currentSavSessionId = useMemo(() => {
+    if (!currentSessionRaw) return "";
+    return (
+      safeStr(get(currentSessionRaw, "sav_session_id", ""), "") ||
+      safeStr(get(currentSessionRaw, "id", ""), "")
+    );
+  }, [currentSessionRaw]);
+
+  // 2) notes raw
+  const notesRaw = (get(currentSessionRaw, "notes", []) || []) as any[];
+
+  // 3) notes UI (normalisées)
+  const uiNotes = useMemo<UiSavNote[]>(() => {
+    if (!Array.isArray(notesRaw)) return [];
+
+    return notesRaw.map((n: any, idx: number) => {
+      const id =
+        safeStr(get(n, "note_id", ""), "") ||
+        safeStr(get(n, "id", ""), "") ||
+        `note-idx-${idx}`;
+
+      const createdAt =
+        safeStr(get(n, "created_at", ""), "") ||
+        safeStr(get(n, "sent_at", ""), "");
+
+      const updatedAt =
+        safeStr(get(n, "updated_at", ""), "") ||
+        createdAt;
+
+      return {
+        id,
+        target: normalizeNoteTarget(get(n, "target", "")),
+        channel: normalizeNoteChannel(get(n, "channel", "")),
+        status: normalizeNoteStatus(get(n, "status", "")),
+        text: safeStr(get(n, "text", ""), ""),
+        createdAt,
+        updatedAt,
+      };
+    });
+  }, [notesRaw]);
+
+  type UiHistoryNote = UiSavNote & {
+    statusCode: "DRAFT" | "SENT" | "FAILED";
+    inputCount: number;
+    outputCount: number;
+    fileCount: number;
+    dateLabel: string; // basé sur updatedAt (fallback createdAt)
+  };
+
+  const uiNotesHistory = useMemo<UiHistoryNote[]>(() => {
+    if (!Array.isArray(notesRaw)) return [];
+
+    const rawById = new Map<string, any>();
+    for (const n of notesRaw) {
+      const id =
+        safeStr(get(n, "note_id", ""), "") ||
+        safeStr(get(n, "id", ""), "");
+      if (id) rawById.set(id, n);
+    }
+
+    const score = (n: UiSavNote) => {
+      const t = Date.parse(n.updatedAt) || Date.parse(n.createdAt) || 0;
+      return Number.isFinite(t) ? t : 0;
     };
+
+    const sorted = [...uiNotes].sort((a, b) => score(b) - score(a));
+
+    return sorted.map((n) => {
+      const raw = rawById.get(n.id) || null;
+
+      const inputArr = (get(raw, "includes.input_photo_uids", []) || []) as any[];
+      const outputArr = (get(raw, "includes.output_asset_ids", []) || []) as any[];
+      const fileArr = (get(raw, "includes.file_ids", []) || []) as any[];
+
+      const inputCount = Array.isArray(inputArr) ? inputArr.length : 0;
+      const outputCount = Array.isArray(outputArr) ? outputArr.length : 0;
+      const fileCount = Array.isArray(fileArr) ? fileArr.length : 0;
+
+      const statusCode = normalizeNoteStatusCode(get(raw, "status", ""));
+
+      const dateLabel = formatHumanDate(n.updatedAt || n.createdAt);
+
+      return {
+        ...n,
+        statusCode,
+        inputCount,
+        outputCount,
+        fileCount,
+        dateLabel,
+      };
+    });
+  }, [notesRaw, uiNotes]);
+
+  // 4) activeNoteId state + init fallback
+  const [activeNoteId, setActiveNoteId] = useState<string>("");
+
+  // init: si activeNoteId absent ou invalide, choisir la plus récente, sinon "__draft__"
+  useEffect(() => {
+    if (!currentSessionRaw) {
+      if (activeNoteId) setActiveNoteId("");
+      return;
+    }
+
+    if (activeNoteId && uiNotes.some((n) => n.id === activeNoteId)) return;
+
+    if (uiNotes.length > 0) {
+      setActiveNoteId(pickMostRecentNoteId(uiNotes));
+      return;
+    }
+
+    // pas de note => on met un placeholder draft (création API viendra en 4.2)
+    setActiveNoteId("__draft__");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [currentSessionRaw, uiNotes]);
 
-  const effectiveSessionId = loadedSessionId || key;
+  const activeNote = useMemo<UiSavNote | null>(() => {
+    if (activeNoteId === "__draft__") {
+      return {
+        id: "__draft__",
+        target: "—",
+        channel: "—",
+        status: "Brouillon",
+        text: "",
+        createdAt: "",
+        updatedAt: "",
+      };
+    }
+    return uiNotes.find((n) => n.id === activeNoteId) ?? null;
+  }, [uiNotes, activeNoteId]);
 
-  // --- Persist session meta (PATCH /sessions/{id}) ---
-  const patchSession = useCallback(
-    async (patch: Partial<SessionDetail>) => {
-      if (!effectiveSessionId) return;
-      try {
-        const res = await fetch(buildUrl(`/sessions/${encodeURIComponent(effectiveSessionId)}`), {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...patch, actor: currentUser }),
-        });
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`PATCH session (${res.status}) : ${txt || "Erreur"}`);
+  // ---------------------------
+  // Étape 4.2 — Note en cours (editor) + upload P0
+  // ---------------------------
+
+  // Raw note (pour includes + patch)
+  const activeNoteRaw = useMemo<any | null>(() => {
+    if (!Array.isArray(notesRaw)) return null;
+    if (!activeNoteId || activeNoteId === "__draft__") return null;
+
+    const found = notesRaw.find((n: any) => {
+      const id =
+        safeStr(get(n, "note_id", ""), "") ||
+        safeStr(get(n, "id", ""), "");
+      return id === activeNoteId;
+    });
+
+    return found || null;
+  }, [notesRaw, activeNoteId]);
+
+  // ---------------------------
+  // Étape 4.3 — Bibliothèques disponibles (union inter-notes)
+  // ---------------------------
+
+  type AvailableAsset = {
+    assetId: string;
+    url: string;
+    noteId: string; // provenance (optionnel)
+  };
+
+  type AvailableFile = {
+    fileId: string;
+    url: string;
+    name: string;
+    noteId: string; // provenance (optionnel)
+  };
+
+  const availableFiles = useMemo<AvailableFile[]>(() => {
+    const m = new Map<string, AvailableFile>();
+    if (!Array.isArray(notesRaw)) return [];
+    for (const n of notesRaw) {
+      const noteId =
+        safeStr(get(n, "note_id", ""), "") || safeStr(get(n, "id", ""), "");
+      const files = (get(n, "attachments", []) || []) as any[];
+      if (!Array.isArray(files)) continue;
+
+      for (const f of files) {
+        const fileId = safeStr(get(f, "file_id", ""), "");
+        if (!fileId) continue;
+        const url = safeStr(get(f, "url", ""), "");
+        if (!url) continue;
+        const name =
+          safeStr(get(f, "name", ""), "") ||
+          safeStr(get(f, "filename", ""), "") ||
+          "Fichier";
+
+        if (!m.has(fileId)) {
+          m.set(fileId, { fileId, url, name, noteId });
         }
-
-        // optimistic update UI
-        setDetail((prev) => (prev ? deepMerge(prev as any, patch) : prev));
-      } catch (err) {
-        console.error(err);
-        setToast({
-          type: "error",
-          message:
-            (err as any)?.message ||
-            "Erreur lors de la sauvegarde des informations chantier.",
-        });
       }
+    }
+    return Array.from(m.values());
+  }, [notesRaw]);
+
+  const includedInputUids = useMemo<string[]>(() => {
+    const arr = (get(activeNoteRaw, "includes.input_photo_uids", []) || []) as any[];
+    return Array.isArray(arr) ? arr.map((x) => safeStr(x, "")).filter(Boolean) : [];
+  }, [activeNoteRaw]);
+
+  const includedOutputAssetIds = useMemo<string[]>(() => {
+    const arr = (get(activeNoteRaw, "includes.output_asset_ids", []) || []) as any[];
+    return Array.isArray(arr) ? arr.map((x) => safeStr(x, "")).filter(Boolean) : [];
+  }, [activeNoteRaw]);
+
+  const includedFileIds = useMemo<string[]>(() => {
+    const arr = (get(activeNoteRaw, "includes.file_ids", []) || []) as any[];
+    return Array.isArray(arr) ? arr.map((x) => safeStr(x, "")).filter(Boolean) : [];
+  }, [activeNoteRaw]);
+
+  async function toggleInclude(
+    kind: "input" | "output" | "file",
+    id: string,
+  ) {
+    if (!id) return;
+
+    const noteId = await ensureNoteExists();
+
+    const current =
+      kind === "input"
+        ? includedInputUids
+        : kind === "output"
+          ? includedOutputAssetIds
+          : includedFileIds;
+
+    const set = new Set(current);
+    if (set.has(id)) set.delete(id);
+    else set.add(id);
+
+    const next = Array.from(set);
+
+    setNoteDirty(true);
+    setNoteSaveState("idle");
+    setNoteSaveError(null);
+
+    await patchNote(noteId, {
+      actor: currentUser,
+      includes:
+        kind === "input"
+          ? { input_photo_uids: next }
+          : kind === "output"
+            ? { output_asset_ids: next }
+            : { file_ids: next },
+    });
+
+    await fetchSavItem();
+  }
+
+  function normalizeTargetCode(v: any): NoteTargetCode {
+    const s = safeStr(v, "").toUpperCase();
+    const ok = NOTE_TARGET_OPTIONS.some((o) => o.code === (s as any));
+    return (ok ? (s as any) : "INTERNE") as NoteTargetCode;
+  }
+  function normalizeChannelCode(v: any): NoteChannelCode {
+    const s = safeStr(v, "").toUpperCase();
+    const ok = NOTE_CHANNEL_OPTIONS.some((o) => o.code === (s as any));
+    return (ok ? (s as any) : "WHATSAPP") as NoteChannelCode;
+  }
+
+  const includesInputCount = useMemo(() => {
+    const arr = (get(activeNoteRaw, "includes.input_photo_uids", []) || []) as any[];
+    return Array.isArray(arr) ? arr.length : 0;
+  }, [activeNoteRaw]);
+
+  const includesOutputCount = useMemo(() => {
+    const arr = (get(activeNoteRaw, "includes.output_asset_ids", []) || []) as any[];
+    return Array.isArray(arr) ? arr.length : 0;
+  }, [activeNoteRaw]);
+
+  const includesFileCount = useMemo(() => {
+    const arr = (get(activeNoteRaw, "includes.file_ids", []) || []) as any[];
+    return Array.isArray(arr) ? arr.length : 0;
+  }, [activeNoteRaw]);
+
+  // Etats UI editor (codes, pas les labels)
+  const [noteTarget, setNoteTarget] = useState<NoteTargetCode>("INTERNE");
+  const [noteChannel, setNoteChannel] = useState<NoteChannelCode>("NONE");
+  const [noteText, setNoteText] = useState<string>("");
+  const [noteDirty, setNoteDirty] = useState<boolean>(false);
+
+  // Etat autosave
+  type NoteSaveState = "idle" | "saving" | "saved" | "error";
+  const [noteSaveState, setNoteSaveState] = useState<NoteSaveState>("idle");
+  const [noteSaveError, setNoteSaveError] = useState<string | null>(null);
+
+  type NotePublishState = "idle" | "publishing" | "published" | "error";
+  const [notePublishState, setNotePublishState] = useState<NotePublishState>("idle");
+  const [notePublishError, setNotePublishError] = useState<string | null>(null);
+
+  type AiState = "idle" | "loading" | "success" | "error";
+
+  const [aiState, setAiState] = useState<AiState>("idle");
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiSuggestion, setAiSuggestion] = useState<AiImproveResult | null>(null);
+  const [aiSourceText, setAiSourceText] = useState<string>("");
+
+  // Upload refs
+  const uploadVisualInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+
+  const lastInitNoteIdRef = useRef<string>("");
+
+  // Init editor quand on change de note active (IMPORTANT: ne pas écraser pendant un refresh)
+  useEffect(() => {
+    if (lastInitNoteIdRef.current === activeNoteId) return;
+    lastInitNoteIdRef.current = activeNoteId;
+
+    setAiState("idle");
+    setAiError(null);
+    setAiSuggestion(null);
+    setAiSourceText("");
+
+    // Draft local
+    if (activeNoteId === "__draft__" || !activeNoteRaw) {
+      setNoteTarget("INTERNE");
+      setNoteChannel("NONE");
+      setNoteText("");
+      setNoteSaveState("idle");
+      setNoteSaveError(null);
+      setNotePublishState("idle");
+      setNotePublishError(null);
+      setNoteDirty(false);
+      return;
+    }
+
+    const t = normalizeTargetCode(get(activeNoteRaw, "target", "INTERNE"));
+    let c = normalizeChannelCode(
+      get(activeNoteRaw, "channel", t === "INTERNE" ? "NONE" : "WHATSAPP"),
+    );
+    if (t === "INTERNE") c = "NONE";
+
+    setNoteTarget(t);
+    setNoteChannel(c);
+    setNoteText(safeStr(get(activeNoteRaw, "text", ""), ""));
+    setNoteSaveState("idle");
+    setNoteSaveError(null);
+    setNotePublishState("idle");
+    setNotePublishError(null);
+    setNoteDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeNoteId]);
+
+  // Si target=INTERNE => channel forcé NONE
+  useEffect(() => {
+    if (noteTarget === "INTERNE" && noteChannel !== "NONE") {
+      setNoteChannel("NONE");
+    }
+  }, [noteTarget, noteChannel]);
+
+  const createNote = useCallback(
+    async (payload: Record<string, any>) => {
+      if (!key) throw new Error("chantier_id manquant");
+      if (!currentSavSessionId) throw new Error("sav_session_id manquant");
+
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key,
+      )}/sav-sessions/${encodeURIComponent(currentSavSessionId)}/notes`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Erreur API POST note: HTTP ${res.status} — ${txt.slice(0, 220)}`);
+      }
+
+      return res.json().catch(() => ({}));
     },
-    [effectiveSessionId, currentUser]
+    [API_BASE, key, currentSavSessionId],
   );
 
-  // --- Persist chantier meta (PATCH /chantiers/{id}) ---
-  const patchChantier = useCallback(
-    async (patch: any) => {
-      if (!chantierMeta.chantier_id) return;
-      try {
-        const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantierMeta.chantier_id)}`), {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...patch, actor: currentUser }),
-        });
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`PATCH chantier (${res.status}) : ${txt || "Erreur"}`);
-        }
+  const patchNote = useCallback(
+    async (noteId: string, payload: Record<string, any>) => {
+      if (!key) throw new Error("chantier_id manquant");
+      if (!currentSavSessionId) throw new Error("sav_session_id manquant");
 
-        // optimistic update UI
-        setChantier((prev) => (prev ? deepMerge(prev as any, patch) : prev));
-      } catch (err) {
-        console.error(err);
-        setToast({
-          type: "error",
-          message:
-            (err as any)?.message ||
-            "Erreur lors de la sauvegarde du chantier.",
-        });
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key,
+      )}/sav-sessions/${encodeURIComponent(currentSavSessionId)}/notes/${encodeURIComponent(noteId)}`;
+
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Erreur API PATCH note: HTTP ${res.status} — ${txt.slice(0, 220)}`);
       }
+
+      return res.json().catch(() => ({}));
     },
-    [chantierMeta.chantier_id, currentUser]
+    [API_BASE, key, currentSavSessionId],
   );
 
-  const debouncedPatchSession = useDebouncedCallback(patchSession, 600);
-  const debouncedPatchChantier = useDebouncedCallback(patchChantier, 600);
+  const improveNoteWithAi = useCallback(
+    async (noteId: string) => {
+      if (!key) throw new Error("chantier_id manquant");
+      if (!currentSavSessionId) throw new Error("sav_session_id manquant");
+      if (!noteId || noteId === "__draft__") throw new Error("note_id manquant");
 
-  const debouncedCrmSearch = useDebouncedCallback(async (q: string) => {
-    const query = q.trim();
-    if (!query) {
-      setCrmResults([]);
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key,
+      )}/sav/${encodeURIComponent(currentSavSessionId)}/notes/${encodeURIComponent(noteId)}/ai-improve`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Erreur API AI improve: HTTP ${res.status} — ${txt.slice(0, 220)}`);
+      }
+
+      return (await res.json()) as AiImproveResponse;
+    },
+    [API_BASE, key, currentSavSessionId],
+  );
+
+  const ensureNoteExists = useCallback(async () => {
+    if (activeNoteId && activeNoteId !== "__draft__") return activeNoteId;
+
+    // Création P0 (au 1er edit/upload)
+    const t = noteTarget || "INTERNE";
+    const c = t === "INTERNE" ? "NONE" : (noteChannel || "WHATSAPP");
+
+    const created = await createNote({
+      actor: currentUser,
+      target: t,
+      channel: c,
+      status: "DRAFT",
+      text: noteText || "",
+      includes: { input_photo_uids: [], output_asset_ids: [], file_ids: [] },
+    });
+
+    const newId = safeStr(get(created, "note.note_id", ""), "") || safeStr(get(created, "note_id", ""), "");
+    if (!newId) throw new Error("Création note OK mais ID introuvable");
+
+    setActiveNoteId(newId);
+    // refresh chantier pour récupérer note + includes
+    await fetchSavItem();
+
+    return newId;
+  }, [activeNoteId, noteTarget, noteChannel, noteText, createNote, currentUser, fetchSavItem]);
+
+  const saveNoteNow = useCallback(async () => {
+    try {
+      setNoteSaveState("saving");
+      setNoteSaveError(null);
+
+      const noteId = await ensureNoteExists();
+
+      const t = noteTarget || "INTERNE";
+      const c = t === "INTERNE" ? "NONE" : (noteChannel || "WHATSAPP");
+
+      await patchNote(noteId, {
+        actor: currentUser,
+        target: t,
+        channel: c,
+        text: noteText || "",
+      });
+
+      setNoteSaveState("saved");
+      setNoteDirty(false);
+      await fetchSavItem(); // refresh pour retrouver includes + garder cohérence
+    } catch (e: any) {
+      setNoteSaveState("error");
+      setNoteSaveError(e?.message || "Erreur enregistrement");
+    }
+  }, [ensureNoteExists, patchNote, currentUser, noteTarget, noteChannel, noteText, fetchSavItem]);
+
+  const publishNoteNow = useCallback(async () => {
+    try {
+      setNotePublishState("publishing");
+      setNotePublishError(null);
+
+      // 1) S’assure que la note existe + la sauvegarde si nécessaire
+      if (noteDirty) {
+        await saveNoteNow();
+      } else {
+        // même si pas dirty, on s'assure qu'il y a bien une note id (cas __draft__)
+        await ensureNoteExists();
+      }
+
+      const noteId = activeNoteId === "__draft__" ? await ensureNoteExists() : activeNoteId;
+
+      // 2) Interdire publish si canal NONE (ex: INTERNE)
+      const t = noteTarget || "INTERNE";
+      const c = t === "INTERNE" ? "NONE" : (noteChannel || "WHATSAPP");
+      if (c === "NONE") {
+        throw new Error("Impossible de publier: aucun canal sélectionné (—).");
+      }
+
+      // 3) Call backend send
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key,
+      )}/sav/${encodeURIComponent(currentSavSessionId)}/notes/${encodeURIComponent(noteId)}/send`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: currentUser }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Erreur publication: HTTP ${res.status} — ${txt.slice(0, 220)}`);
+      }
+
+      setNotePublishState("published");
+      await fetchSavItem(); // refresh pour voir status SENT/FAILED + last_error
+      window.setTimeout(() => setNotePublishState("idle"), 1500);
+    } catch (e: any) {
+      setNotePublishState("error");
+      setNotePublishError(e?.message || "Erreur publication");
+    }
+  }, [
+    API_BASE,
+    key,
+    currentSavSessionId,
+    activeNoteId,
+    currentUser,
+    noteTarget,
+    noteChannel,
+    noteDirty,
+    saveNoteNow,
+    ensureNoteExists,
+    fetchSavItem,
+  ]);
+
+  const createNewDraftNote = useCallback(async () => {
+    try {
+      setNoteSaveState("idle");
+      setNoteSaveError(null);
+
+      const created = await createNote({
+        actor: currentUser,
+        target: "INTERNE",
+        channel: "NONE",
+        status: "DRAFT",
+        text: "",
+        includes: { input_photo_uids: [], output_asset_ids: [], file_ids: [] },
+      });
+
+      const newId =
+        safeStr(get(created, "note.note_id", ""), "") ||
+        safeStr(get(created, "note_id", ""), "");
+
+      if (!newId) throw new Error("Création note OK mais ID introuvable");
+
+      setActiveNoteId(newId);
+      await fetchSavItem();
+    } catch (e: any) {
+      setNoteSaveState("error");
+      setNoteSaveError(e?.message || "Erreur création note");
+    }
+  }, [createNote, currentUser, fetchSavItem]);
+
+  const handleImproveWithAi = useCallback(async () => {
+    try {
+      setAiState("loading");
+      setAiError(null);
+      setAiSuggestion(null);
+
+      // 1) garantir que la note existe
+      let noteId = await ensureNoteExists();
+
+      // 2) sauvegarder ce qui est réellement affiché à l'écran avant appel IA
+      const t = noteTarget || "INTERNE";
+      const c = t === "INTERNE" ? "NONE" : (noteChannel || "WHATSAPP");
+
+      setNoteSaveState("saving");
+      setNoteSaveError(null);
+
+      await patchNote(noteId, {
+        actor: currentUser,
+        target: t,
+        channel: c,
+        text: noteText || "",
+      });
+
+      setNoteSaveState("saved");
+      setNoteDirty(false);
+
+      // on garde une copie du texte exact envoyé à l'IA
+      setAiSourceText(noteText || "");
+
+      // refresh pour rester cohérent avec le backend
+      await fetchSavItem();
+
+      // 3) appel IA sur la dernière version réellement sauvegardée
+      const json = await improveNoteWithAi(noteId);
+
+      if (!json?.ok || !json?.result) {
+        throw new Error("Réponse IA invalide");
+      }
+
+      setAiSuggestion(json.result);
+      setAiState("success");
+    } catch (e: any) {
+      setAiState("error");
+      setAiError(e?.message || "Erreur amélioration IA");
+      setNoteSaveState("error");
+      setNoteSaveError(e?.message || "Erreur enregistrement avant IA");
+    }
+  }, [
+    ensureNoteExists,
+    noteTarget,
+    noteChannel,
+    noteText,
+    patchNote,
+    currentUser,
+    fetchSavItem,
+    improveNoteWithAi,
+  ]);
+
+  const handleApplyAiSuggestion = useCallback(async () => {
+    const suggested = aiSuggestion?.suggested_body || "";
+    if (!suggested.trim()) return;
+
+    try {
+      setNoteText(suggested);
+      setNoteDirty(true);
+      setNoteSaveState("saving");
+      setNoteSaveError(null);
+
+      const noteId = await ensureNoteExists();
+
+      const t = noteTarget || "INTERNE";
+      const c = t === "INTERNE" ? "NONE" : (noteChannel || "WHATSAPP");
+
+      await patchNote(noteId, {
+        actor: currentUser,
+        target: t,
+        channel: c,
+        text: suggested,
+      });
+
+      setNoteSaveState("saved");
+      setNoteDirty(false);
+
+      setAiState("idle");
+      setAiError(null);
+      setAiSuggestion(null);
+      setAiSourceText("");
+
+      await fetchSavItem();
+    } catch (e: any) {
+      setNoteSaveState("error");
+      setNoteSaveError(e?.message || "Erreur enregistrement après application IA");
+    }
+  }, [
+    aiSuggestion,
+    ensureNoteExists,
+    noteTarget,
+    noteChannel,
+    currentUser,
+    patchNote,
+    fetchSavItem,
+  ]);
+
+  const handleCancelAiSuggestion = useCallback(() => {
+    setAiState("idle");
+    setAiError(null);
+    setAiSuggestion(null);
+    setAiSourceText("");
+  }, []);
+
+  async function uploadToNote(kind: "asset" | "file", file: File) {
+    const noteId = await ensureNoteExists();
+
+    const base = `${API_BASE}/chantiers/${encodeURIComponent(
+      key as string,
+    )}/sav-sessions/${encodeURIComponent(currentSavSessionId)}/notes/${encodeURIComponent(noteId)}`;
+
+    const url =
+      kind === "asset"
+        ? `${base}/assets?kind=tech_visual`
+        : `${base}/files?kind=file`;
+
+    const fd = new FormData();
+    fd.append("file", file);
+
+    const res = await fetch(url, { method: "POST", body: fd });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`Erreur upload ${kind}: HTTP ${res.status} — ${txt.slice(0, 220)}`);
+    }
+
+    const json = await res.json().catch(() => ({}));
+    const returnedId =
+      kind === "asset"
+        ? safeStr(get(json, "asset.asset_id", ""), "")
+        : safeStr(get(json, "file.file_id", ""), "");
+
+    if (!returnedId) throw new Error("Upload OK mais id introuvable dans la réponse");
+
+    // Auto-include (checkbox sera la source de vérité plus tard dans les tabs)
+    const currentInc =
+      kind === "asset"
+        ? ((get(activeNoteRaw, "includes.output_asset_ids", []) || []) as any[])
+        : ((get(activeNoteRaw, "includes.file_ids", []) || []) as any[]);
+
+    const list = Array.isArray(currentInc) ? currentInc.map((x) => safeStr(x, "")).filter(Boolean) : [];
+    if (!list.includes(returnedId)) list.push(returnedId);
+
+    await patchNote(noteId, {
+      actor: currentUser,
+      includes:
+        kind === "asset"
+          ? { output_asset_ids: list }
+          : { file_ids: list },
+    });
+
+    await fetchSavItem();
+  }
+
+  // ---------------------------
+  // Photos (réelles) — depuis chantier.inputs.photos et sav_session.photos.photo_uids
+  // ---------------------------
+  const inputPhotosRaw = (get(chantier, "inputs.photos", []) || []) as any[];
+
+  function photoUidFrontend(p: any): string | null {
+    const uid = safeStr(get(p, "photo_uid", ""), "");
+    if (uid) return uid;
+    const sid = safeStr(get(p, "session_id", ""), "");
+    const pid = safeStr(get(p, "photo_id_in_session", ""), "");
+    if (sid && pid) return `${sid}__${pid}`;
+    return null;
+  }
+
+  const photosByUid = useMemo(() => {
+    const m = new Map<string, any>();
+    if (!Array.isArray(inputPhotosRaw)) return m;
+    for (const p of inputPhotosRaw) {
+      const uid = photoUidFrontend(p);
+      if (!uid) continue;
+      m.set(uid, p);
+    }
+    return m;
+  }, [inputPhotosRaw]);
+
+  const selectedPhotoUids = useMemo<string[]>(() => {
+    if (!selectedRaw) return [];
+    const uids = (get(selectedRaw, "photos.photo_uids", []) || []) as any[];
+    if (!Array.isArray(uids)) return [];
+    return uids.map((x) => safeStr(x, "")).filter(Boolean);
+  }, [selectedRaw]);
+
+  const selectedPrimaryUid = useMemo(() => {
+    if (!selectedRaw) return "";
+    return (
+      safeStr(get(selectedRaw, "photos.primary_photo_uid", ""), "") ||
+      (selectedPhotoUids[0] || "")
+    );
+  }, [selectedRaw, selectedPhotoUids]);
+
+  const selectedPhotos = useMemo(() => {
+    // On garde aussi les uids “orphelins” (pas trouvés dans inputs.photos) pour debug
+    return selectedPhotoUids.map((uid) => {
+      const p = photosByUid.get(uid);
+      const url =
+        safeStr(get(p, "annotated_url", ""), "") ||
+        safeStr(get(p, "original_url", ""), "");
+      return { uid, p: p || null, url };
+    });
+  }, [selectedPhotoUids, photosByUid]);
+
+  const [activePhotoUid, setActivePhotoUid] = useState<string>("");
+  const [isPhotoFullscreenOpen, setIsPhotoFullscreenOpen] = useState(false);
+  type VfTab = "input" | "output" | "files";
+  const [vfTab, setVfTab] = useState<VfTab>("input");
+  const [activeOutputAssetId, setActiveOutputAssetId] = useState<string>("");
+
+  const availableOutputAssets = useMemo<AvailableAsset[]>(() => {
+    const m = new Map<string, AvailableAsset>();
+    if (!Array.isArray(notesRaw)) return [];
+    for (const n of notesRaw) {
+      const noteId =
+        safeStr(get(n, "note_id", ""), "") || safeStr(get(n, "id", ""), "");
+      const visuals = (get(n, "visuals", []) || []) as any[];
+      if (!Array.isArray(visuals)) continue;
+
+      for (const v of visuals) {
+        const assetId = safeStr(get(v, "asset_id", ""), "");
+        if (!assetId) continue;
+        const url =
+          safeStr(get(v, "url", ""), "") ||
+          safeStr(get(v, "original_url", ""), "") ||
+          safeStr(get(v, "annotated_url", ""), "");
+        if (!url) continue;
+
+        if (!m.has(assetId)) {
+          m.set(assetId, { assetId, url, noteId });
+        }
+      }
+    }
+    return Array.from(m.values());
+  }, [notesRaw]);
+
+  const activeOutputAsset = useMemo<AvailableAsset | null>(() => {
+    if (!activeOutputAssetId) return availableOutputAssets[0] ?? null;
+    return (
+      availableOutputAssets.find((a) => a.assetId === activeOutputAssetId) ??
+      (availableOutputAssets[0] ?? null)
+    );
+  }, [availableOutputAssets, activeOutputAssetId]);
+
+  useEffect(() => {
+    if (vfTab !== "output") return;
+
+    if (!availableOutputAssets.length) {
+      if (activeOutputAssetId) setActiveOutputAssetId("");
+      return;
+    }
+
+    if (
+      activeOutputAssetId &&
+      availableOutputAssets.some((a) => a.assetId === activeOutputAssetId)
+    ) {
+      return;
+    }
+
+    setActiveOutputAssetId(availableOutputAssets[0].assetId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vfTab, availableOutputAssets]);
+  
+  useEffect(() => {
+    // Quand on change de session SAV sélectionnée → on reset sur la primary
+    setActivePhotoUid(selectedPrimaryUid || (selectedPhotoUids[0] || ""));
+  }, [selectedId, selectedPrimaryUid, selectedPhotoUids]);
+
+  const activePhoto = useMemo(() => {
+    if (!activePhotoUid) return null;
+    return selectedPhotos.find((x) => x.uid === activePhotoUid) || null;
+  }, [activePhotoUid, selectedPhotos]);
+
+  const fullscreenUrl = activePhoto?.url || "";
+
+  // ---------------------------
+  // Patch B — Owner connecté
+  // ---------------------------
+  const chantierOwnerFromData = safeStr(get(chantier, "owner", ""), "");
+  const [owner, setOwner] = useState<UserName>("Xavier Briffa");
+  const [ownerSaving, setOwnerSaving] = useState(false);
+
+  // Init owner: chantier.owner > localStorage > défaut
+  useEffect(() => {
+    if (chantierOwnerFromData && USERS.includes(chantierOwnerFromData as any)) {
+      setOwner(chantierOwnerFromData as UserName);
       return;
     }
     try {
-      setCrmLoading(true);
-      const res = await fetch(buildUrl(`/contacts/search?q=${encodeURIComponent(query)}`));
-      if (!res.ok) {
-        setCrmResults([]);
-        return;
-      }
-      const data = await res.json();
-      const arr = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : [];
-      setCrmResults(arr.slice(0, 5));
-    } catch {
-      setCrmResults([]);
-    } finally {
-      setCrmLoading(false);
-    }
-  }, 250);
+      const saved = localStorage.getItem(OWNER_STORAGE_KEY) as UserName;
+      if (saved && USERS.includes(saved)) setOwner(saved);
+    } catch {}
+  }, [chantierOwnerFromData]);
 
   useEffect(() => {
-    debouncedCrmSearch(crmQuery);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [crmQuery]);
+    try {
+      localStorage.setItem(OWNER_STORAGE_KEY, owner);
+    } catch {}
+  }, [owner]);
 
+  const patchChantier = useCallback(
+    async (payload: Record<string, any>) => {
+      if (!key) throw new Error("Impossible de patch: key manquant.");
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(key)}`;
 
-  const displayInstaller = useMemo(() => {
-    const fromChantier = (chantier as any)?.context?.installateur;
-    return {
-      nom: (isChantierMode ? fromChantier?.nom : detail?.installateur?.nom) || "",
-      societe: (isChantierMode ? fromChantier?.societe : detail?.installateur?.societe) || "",
-      phone:
-        (isChantierMode ? fromChantier?.phone : detail?.installateur?.phone) ||
-        detail?.installateur?.user_id ||
-        reportRecipient ||
-        "",
-    };
-  }, [isChantierMode, chantier, detail, reportRecipient]);
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-  const displayReferenceChantier = useMemo(() => {
-    return (
-      (chantier as any)?.context?.reference_chantier ||
-      detail?.chantier?.ref ||
-      detail?.chantier_id ||
-      chantierMeta.chantier_id ||
-      ""
-    );
-  }, [chantier, detail, chantierMeta]);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          `Erreur API PATCH /chantiers: HTTP ${res.status} — ${txt.slice(0, 220)}`,
+        );
+      }
 
-  const displayProductLabel = useMemo(() => {
-    const fromChantier = (chantier as any)?.context?.produit;
-    return (
-      fromChantier?.label ||
-      detail?.produit?.label ||
-      detail?.produit?.code ||
-      "—"
-    );
-  }, [chantier, detail]);
+      return res.json().catch(() => ({}));
+    },
+    [API_BASE, key],
+  );
 
+  // ---------------------------
+  // Étape 2A+2B — Classification éditable + PATCH sav-session dédié
+  // ---------------------------
+  const patchSavSession = useCallback(
+    async (savSessionId: string, payload: Record<string, any>) => {
+      if (!key) throw new Error("Impossible de patch sav-session: key manquant.");
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key,
+      )}/sav-sessions/${encodeURIComponent(savSessionId)}`;
 
-  const displayLastPublishedAt = useMemo(() => {
-    if (isChantierMode) return (chantier as any)?.publication?.last_published_at ?? null;
-    return detail?.last_published_at ?? null;
-  }, [isChantierMode, chantier, detail]);
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-  const displayLastPublishedBy = useMemo(() => {
-    if (isChantierMode) return (chantier as any)?.publication?.last_published_by ?? null;
-    return detail?.last_published_by ?? null;
-  }, [isChantierMode, chantier, detail]);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          `Erreur API PATCH sav-session: HTTP ${res.status} — ${txt.slice(0, 220)}`,
+        );
+      }
 
-  const startEditContext = useCallback(() => {
-    setDraftInstallerName(displayInstaller.nom || "");
-    setDraftInstallerCompany(displayInstaller.societe || "");
-    setDraftInstallerPhone(displayInstaller.phone || "");
-    setDraftReferenceChantier(displayReferenceChantier || "");
-    const code = ((chantier as any)?.context?.produit?.code || detail?.produit?.code || "") as string;
-    setDraftProductCode(code || "");
-    setCrmQuery("");
-    setCrmResults([]);
-    setIsEditingContext(true);
-  }, [displayInstaller, displayReferenceChantier, chantier, detail]);
+      return res.json().catch(() => ({}));
+    },
+    [API_BASE, key],
+  );
 
-  const cancelEditContext = useCallback(() => {
-    setIsEditingContext(false);
-    setCrmQuery("");
-    setCrmResults([]);
-  }, []);
+  const createSavSession = useCallback(
+    async (payload: Record<string, any> = {}) => {
+      if (!key) throw new Error("Impossible de créer une SAV session: key manquant.");
 
-  const saveEditContext = useCallback(async () => {
-    if (!isChantierMode || !chantierMeta.chantier_id) {
-      setToast({ type: "error", message: "Cette session n'est pas encore rattachée à un chantier." });
-      return;
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(key)}/sav-sessions`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {}),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          `Erreur API POST sav-session: HTTP ${res.status} — ${txt.slice(0, 220)}`,
+        );
+      }
+
+      return res.json().catch(() => ({}));
+    },
+    [API_BASE, key],
+  );
+
+  const handleCreateSavSession = useCallback(async () => {
+    if (!key || creatingSavSession) return;
+
+    setCreatingSavSession(true);
+    setCreateSavSessionError(null);
+
+    try {
+      const json = await createSavSession({
+        actor: currentUser,
+      });
+
+      const newSavId = safeStr(get(json, "sav_session_id", ""), "");
+      await fetchSavItem();
+
+      if (newSavId) {
+        setEditingSessionId(null);
+        setSelectedId(newSavId);
+      }
+    } catch (e: any) {
+      setCreateSavSessionError(
+        e?.message || "Erreur lors de la création de la nouvelle session SAV.",
+      );
+    } finally {
+      setCreatingSavSession(false);
     }
+  }, [key, creatingSavSession, createSavSession, currentUser, fetchSavItem]);
 
-    const prod = draftProductCode
-      ? products.find((p) => p.code === draftProductCode) || { code: draftProductCode, label: draftProductCode }
-      : null;
+  const handleChangeSavSessionStatus = useCallback(
+    async (nextStatus: string) => {
+      if (!currentSavSessionId) return;
 
-    const patch = {
-      context: {
-        installateur: {
-          nom: draftInstallerName || null,
-          societe: draftInstallerCompany || null,
-          phone: draftInstallerPhone || null,
-          source: "crm_or_manual",
-        },
-        reference_chantier: draftReferenceChantier || null,
-        produit: prod ? { code: prod.code, label: prod.label } : null,
+      setStatusSaving(true);
+      setStatusSaveError(null);
+
+      try {
+        await patchSavSession(currentSavSessionId, {
+          actor: currentUser,
+          status: nextStatus,
+        });
+
+        await fetchSavItem();
+      } catch (e: any) {
+        setStatusSaveError(
+          e?.message || "Erreur lors de la mise à jour du statut de la session SAV.",
+        );
+      } finally {
+        setStatusSaving(false);
+      }
+    },
+    [currentSavSessionId, patchSavSession, currentUser, fetchSavItem],
+  );
+
+  const handlePreviewInstallateur = useCallback(async () => {
+    if (!key || !currentSavSessionId || previewInstallateurLoading) return;
+
+    setPreviewInstallateurLoading(true);
+    setStatusSaveError(null);
+
+    try {
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key,
+      )}/sav/${encodeURIComponent(currentSavSessionId)}/preview-installateur`;
+
+      const res = await fetch(url, {
+        method: "GET",
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          `Erreur API preview-installateur: HTTP ${res.status} — ${txt.slice(0, 220)}`,
+        );
+      }
+
+      const json = await res.json().catch(() => ({}));
+      const publicUrl = safeStr(get(json, "public_url", ""), "");
+
+      if (!publicUrl) {
+        throw new Error("Aucune URL publique renvoyée pour l’aperçu installateur.");
+      }
+
+      window.open(publicUrl, "_blank", "noopener,noreferrer");
+    } catch (e: any) {
+      setStatusSaveError(
+        e?.message || "Erreur lors de l’ouverture de l’aperçu installateur.",
+      );
+    } finally {
+      setPreviewInstallateurLoading(false);
+    }
+  }, [API_BASE, key, currentSavSessionId, previewInstallateurLoading]);
+
+  type SaveState = "idle" | "saving" | "saved" | "error";
+  const [clsSaveState, setClsSaveState] = useState<SaveState>("idle");
+  const [clsSaveError, setClsSaveError] = useState<string | null>(null);
+
+  const [clsTextSaveState, setClsTextSaveState] = useState<SaveState>("idle");
+  const [clsTextSaveError, setClsTextSaveError] = useState<string | null>(null);
+  const [clsTextDirty, setClsTextDirty] = useState<boolean>(false);
+
+  // États éditables (remplis depuis selectedRaw)
+  const [clsCategory, setClsCategory] = useState<string>("");
+  const [clsSubCategory, setClsSubCategory] = useState<string>("");
+  const [clsSymptom, setClsSymptom] = useState<string>("");
+  const [clsSynthese, setClsSynthese] = useState<string>("");
+  const [clsComponents, setClsComponents] = useState<string[]>([]);
+  const [componentDraft, setComponentDraft] = useState<string>("");
+
+  // Init quand on change de session
+  const clsInitRef = useRef<string>(""); // sav_session_id pour éviter patch au mount
+  useEffect(() => {
+    const sid = safeStr(get(selectedRaw, "sav_session_id", ""), "");
+    if (!sid) return;
+
+    const rawCat = safeStr(get(selectedRaw, "classification.category", ""), "") || "";
+    const rawSub =
+      safeStr(get(selectedRaw, "classification.sub_category", ""), "") ||
+      safeStr(get(selectedRaw, "classification.subCategory", ""), "") ||
+      "";
+    const rawSym = safeStr(get(selectedRaw, "classification.symptom", ""), "") || "";
+    const rawSynthese = safeStr(get(selectedRaw, "classification.synthese", ""), "") || "";
+    const rawComps = Array.isArray(get(selectedRaw, "classification.components", []))
+      ? (get(selectedRaw, "classification.components", []) as any[])
+          .map((x) => safeStr(x, ""))
+          .filter(Boolean)
+      : [];
+
+    setClsCategory(rawCat);
+    setClsSubCategory(rawSub);
+    setClsSymptom(rawSym);
+    setClsSynthese(rawSynthese);
+    setClsComponents(uniqStrings(rawComps));
+    setComponentDraft("");
+
+    setClsSaveState("idle");
+    setClsSaveError(null);
+    setClsTextSaveState("idle");
+    setClsTextSaveError(null);
+    setClsTextDirty(false);
+
+    clsInitRef.current = sid;
+  }, [selectedRaw]);
+
+  // Options de dropdown basées sur les données existantes du chantier (zéro hardcode)
+  const categoryOptions = useMemo(() => {
+    const fromCatalog = catalogClassification?.categories?.map((c) => safeStr(c?.label, "")).filter(Boolean) || [];
+    const fromSessions =
+      Array.isArray(savSessionsRaw)
+        ? savSessionsRaw
+            .map((s: any) => safeStr(get(s, "classification.category", ""), ""))
+            .filter(Boolean)
+        : [];
+    return uniqStrings([clsCategory, ...fromCatalog, ...fromSessions]).filter(Boolean);
+  }, [catalogClassification, savSessionsRaw, clsCategory]);
+
+  const subCategoryOptions = useMemo(() => {
+    const fromCatalog =
+      catalogClassification?.sub_categories?.map((sc) => safeStr(sc?.label, "")).filter(Boolean) || [];
+
+    // si tu veux filtrer les sous-cats par catégorie -> il faudrait une relation cat->subcat.
+    // Ton endpoint actuel ne la fournit pas, donc on garde une liste unique globale.
+    const fromSessions =
+      Array.isArray(savSessionsRaw)
+        ? savSessionsRaw
+            .map(
+              (s: any) =>
+                safeStr(get(s, "classification.sub_category", ""), "") ||
+                safeStr(get(s, "classification.subCategory", ""), ""),
+            )
+            .filter(Boolean)
+        : [];
+
+    return uniqStrings([clsSubCategory, ...fromCatalog, ...fromSessions]).filter(Boolean);
+  }, [catalogClassification, savSessionsRaw, clsSubCategory]);
+
+  // ---------------------------
+  // Catalogue composants (common + produit)
+  // ---------------------------
+  const [catalogComponents, setCatalogComponents] = useState<string[]>([]);
+  const [catalogComponentsError, setCatalogComponentsError] = useState<string | null>(null);
+
+  const fetchCatalogComponents = useCallback(
+    async (productLabel: string) => {
+      setCatalogComponentsError(null);
+      try {
+        const url = `${API_BASE}/catalog/components?product=${encodeURIComponent(productLabel || "")}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const suggestions = Array.isArray(json?.suggestions) ? json.suggestions : [];
+        setCatalogComponents(suggestions.map((x: any) => safeStr(x, "")).filter(Boolean));
+      } catch (e: any) {
+        setCatalogComponents([]);
+        setCatalogComponentsError(e?.message || "Erreur catalogue composants");
+      }
+    },
+    [API_BASE],
+  );
+
+  // Fetch catalogue composants quand le produit change
+  useEffect(() => {
+    // On privilégie le code si on l’a, sinon fallback sur ce qui est stocké dans le chantier
+    const productForCatalog = (productCode || produitRaw || "").trim();
+    fetchCatalogComponents(productForCatalog);
+  }, [productCode, produitRaw, fetchCatalogComponents]);
+
+  const componentSuggestions = useMemo(() => {
+    const comps: string[] = [];
+    if (Array.isArray(savSessionsRaw)) {
+      for (const s of savSessionsRaw) {
+        const arr = get(s, "classification.components", []);
+        if (Array.isArray(arr)) {
+          for (const x of arr) comps.push(safeStr(x, ""));
+        }
+      }
+    }
+    return uniqStrings([...catalogComponents, ...clsComponents, ...comps]).filter(Boolean);
+  }, [savSessionsRaw, clsComponents, catalogComponents]);
+
+  // Debounced PATCH
+  const clsDebounceTimer = useRef<number | null>(null);
+  const clsLastSentRef = useRef<any>(null);
+
+  const computeClassificationDiffPayload = useCallback(() => {
+    const sid = safeStr(get(selectedRaw, "sav_session_id", ""), "");
+    if (!sid) return null;
+
+    const rawCat = safeStr(get(selectedRaw, "classification.category", ""), "") || "";
+    const rawSub =
+      safeStr(get(selectedRaw, "classification.sub_category", ""), "") ||
+      safeStr(get(selectedRaw, "classification.subCategory", ""), "") ||
+      "";
+    const rawComps = Array.isArray(get(selectedRaw, "classification.components", []))
+      ? (get(selectedRaw, "classification.components", []) as any[])
+          .map((x) => safeStr(x, ""))
+          .filter(Boolean)
+      : [];
+
+    const nextComps = uniqStrings(clsComponents);
+
+    const changed =
+      (clsCategory || "") !== (rawCat || "") ||
+      (clsSubCategory || "") !== (rawSub || "") ||
+      !arraysEqualIgnoreOrder(nextComps, uniqStrings(rawComps));
+
+    if (!changed) return { sid, payload: null };
+
+    const payload = {
+      actor: currentUser,
+      classification: {
+        category: clsCategory || "",
+        sub_category: clsSubCategory || "",
+        components: nextComps,
       },
     };
 
-    await patchChantier(patch);
-    setIsEditingContext(false);
-    setToast({ type: "success", message: "Contexte enregistré." });
+    return { sid, payload };
+  }, [selectedRaw, clsCategory, clsSubCategory, clsComponents, currentUser]);
+
+  useEffect(() => {
+    const sid = safeStr(get(selectedRaw, "sav_session_id", ""), "");
+    if (!sid) return;
+
+    // éviter patch juste après init
+    if (clsInitRef.current === sid && clsLastSentRef.current == null) {
+      // on autorise ensuite (après 1 tick)
+      clsLastSentRef.current = {};
+      return;
+    }
+
+    if (clsDebounceTimer.current) window.clearTimeout(clsDebounceTimer.current);
+
+    clsDebounceTimer.current = window.setTimeout(async () => {
+      const res = computeClassificationDiffPayload();
+      if (!res || !res.sid) return;
+      if (!res.payload) {
+        setClsSaveState("idle");
+        setClsSaveError(null);
+        return;
+      }
+
+      setClsSaveState("saving");
+      setClsSaveError(null);
+      try {
+        await patchSavSession(res.sid, res.payload);
+        setClsSaveState("saved");
+        // refresh pour refléter les données (et garder UI en phase)
+        await fetchSavItem();
+        // repasse en idle après un court délai
+        window.setTimeout(() => setClsSaveState("idle"), 800);
+      } catch (e: any) {
+        setClsSaveState("error");
+        setClsSaveError(e?.message || "Erreur patch classification");
+      }
+    }, 450);
+
+    return () => {
+      if (clsDebounceTimer.current) window.clearTimeout(clsDebounceTimer.current);
+    };
   }, [
-    isChantierMode,
-    chantierMeta.chantier_id,
-    draftInstallerName,
-    draftInstallerCompany,
-    draftInstallerPhone,
-    draftReferenceChantier,
-    draftProductCode,
-    products,
-    patchChantier,
+    selectedRaw,
+    clsCategory,
+    clsSubCategory,
+    clsComponents,
+    computeClassificationDiffPayload,
+    patchSavSession,
+    fetchSavItem,
   ]);
 
+  const addComponent = useCallback(() => {
+    const v = (componentDraft || "").trim();
+    if (!v) return;
+    setClsComponents((prev) => uniqStrings([...prev, v]));
+    setComponentDraft("");
+  }, [componentDraft]);
 
-  // Save meta fields (route depending on kind)
-  useEffect(() => {
-    if (!detail) return;
+  const removeComponent = useCallback((name: string) => {
+    const n = (name || "").trim().toLowerCase();
+    setClsComponents((prev) => prev.filter((x) => x.trim().toLowerCase() !== n));
+  }, []);
 
-    if (isChantierMode) {
-      debouncedPatchChantier({
-        participants: {
-          report_recipient_phone: reportRecipient,
-        },
-        context: {
-          description_installateur: descriptionInstallateur,
-          numero_serie: numeroSerie,
+  const saveClassificationTextsNow = useCallback(async () => {
+    const sid = safeStr(get(selectedRaw, "sav_session_id", ""), "");
+    if (!sid) return;
+
+    try {
+      setClsTextSaveState("saving");
+      setClsTextSaveError(null);
+
+      await patchSavSession(sid, {
+        actor: currentUser,
+        classification: {
+          symptom: clsSymptom || "",
+          synthese: clsSynthese || "",
         },
       });
+
+      setClsTextSaveState("saved");
+      setClsTextDirty(false);
+      await fetchSavItem();
+      window.setTimeout(() => setClsTextSaveState("idle"), 1000);
+    } catch (e: any) {
+      setClsTextSaveState("error");
+      setClsTextSaveError(e?.message || "Erreur enregistrement texte");
+    }
+  }, [selectedRaw, patchSavSession, currentUser, clsSymptom, clsSynthese, fetchSavItem]);
+
+  const onOwnerChange = useCallback(
+    async (newOwner: UserName) => {
+      setOwner(newOwner);
+      setOwnerSaving(true);
+      try {
+        await patchChantier({
+          actor: currentUser,
+          owner: newOwner,
+        });
+        await fetchSavItem(); // refresh pour refléter l'objet
+      } finally {
+        setOwnerSaving(false);
+      }
+    },
+    [currentUser, fetchSavItem, patchChantier],
+  );
+
+  const [productSaving, setProductSaving] = useState<boolean>(false);
+
+  const [referenceSaving, setReferenceSaving] = useState<boolean>(false);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
+
+  const [numeroSerieSaving, setNumeroSerieSaving] = useState<boolean>(false);
+  const [numeroSerieError, setNumeroSerieError] = useState<string | null>(null);
+
+  const onProductChange = useCallback(
+    async (newCode: string) => {
+      setProductCode(newCode);
+      setProductSaving(true);
+      try {
+        await patchChantier({
+          actor: currentUser,
+          context: { produit: newCode || "" },
+        });
+        await fetchSavItem();
+      } finally {
+        setProductSaving(false);
+      }
+    },
+    [currentUser, fetchSavItem, patchChantier],
+  );
+
+  const onReferenceChantierSave = useCallback(async () => {
+    const nextValue = (referenceChantier || "").trim();
+
+    if (nextValue === referenceChantierFromData) {
+      setReferenceError(null);
       return;
     }
 
-    debouncedPatchSession({
-      report_recipient_number: reportRecipient,
-      description_installateur: descriptionInstallateur,
-      numero_serie: numeroSerie,
-    } as any);
+    setReferenceSaving(true);
+    setReferenceError(null);
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportRecipient, descriptionInstallateur, numeroSerie, isChantierMode]);
-
-  // --- Persist notes ---
-  const saveNotesToBackend = useCallback(async () => {
-    if (isChantierMode) {
-      const now = Math.floor(Date.now() / 1000);
+    try {
       await patchChantier({
-        outputs: {
-          notes_sav: notes,
-          note_sav_generale: { text: globalSavNote || "", updated_at: now },
+        actor: currentUser,
+        context: {
+          reference_chantier: nextValue,
         },
       });
-      return;
-    }
 
-    // legacy session storage
-    const payload = JSON.stringify({
-      notes,
-      global: globalSavNote || "",
-      v: 1,
-    });
-    await patchSession({ notes_sav: payload } as any);
-  }, [notes, globalSavNote, patchSession, patchChantier, isChantierMode]);
-
-  const debouncedSaveNotes = useDebouncedCallback(saveNotesToBackend, 700);
-
-  useEffect(() => {
-    if (!detail) return;
-    debouncedSaveNotes();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notes, globalSavNote, isChantierMode]);
-
-  // --- Include in report ---
-  const saveIncludeDraft = useCallback(
-    async (uiPhotoId: string, include: boolean) => {
-      if (!effectiveSessionId) return;
-
-      const mapped = chantierPhotoIdMap[uiPhotoId];
-      const targetSessionId = mapped?.session_id || effectiveSessionId;
-      const targetPhotoId = mapped?.photo_id || uiPhotoId;
-
-      try {
-        await fetch(
-          buildUrl(
-            `/sessions/${encodeURIComponent(targetSessionId)}/photos/${encodeURIComponent(targetPhotoId)}/draft`
-          ),
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ include_in_report: include }),
-          }
-        );
-      } catch (err) {
-        console.warn("Draft include save failed", err);
-      }
-    },
-    [effectiveSessionId, chantierPhotoIdMap]
-  );
-
-  const toggleInclude = useCallback(
-    (photoId: string) => {
-      setIncludeMap((prev) => {
-        const next = { ...prev, [photoId]: prev[photoId] === false ? true : false };
-        saveIncludeDraft(photoId, next[photoId] !== false);
-        return next;
-      });
-    },
-    [saveIncludeDraft]
-  );
-
-  // --- Notes: edit helpers ---
-  const activeNote = useMemo(
-    () => (activeNoteId ? notes.find((n) => n.id === activeNoteId) || null : null),
-    [notes, activeNoteId]
-  );
-
-  const startNewNote = useCallback(() => {
-    setActiveNoteId(null);
-    setNoteText("");
-    setNotePhotos(includedPhotoIds.length ? includedPhotoIds.slice(0, 3) : []);
-    setSelectedAssetId(null);
-  }, [includedPhotoIds]);
-
-  useEffect(() => {
-    if (!detail) return;
-    if (notes.length === 0 && activeNoteId === null && noteText === "" && notePhotos.length === 0) {
-      startNewNote();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail]);
-
-  const openNoteForEdit = useCallback(
-    (id: string) => {
-      const n = notes.find((x) => x.id === id);
-      if (!n) return;
-      setActiveNoteId(id);
-      setNoteText(n.text || "");
-      setNotePhotos(n.photo_ids || []);
-      if (n.photo_ids?.length) setSelectedPhotoId(n.photo_ids[0]);
-      // ✅ par défaut : sélectionner le premier visuel de cette note
-      const first = (n.assets || [])[0]?.asset_id || null;
-      setSelectedAssetId(first);
-    },
-    [notes]
-  );
-
-  const upsertNote = useCallback(() => {
-    const cleanedText = (noteText || "").trim();
-    if (!cleanedText) {
-      setToast({ type: "error", message: "Écris au moins une recommandation SAV dans la note." });
-      return;
-    }
-
-    const cleanedPhotos = Array.from(new Set((notePhotos || []).filter(Boolean)));
-    const now = Math.floor(Date.now() / 1000);
-
-    if (activeNoteId) {
-      const exists = notes.some((n) => n.id === activeNoteId);
-      if (!exists) {
-        const newNote: SavNote = {
-          id: activeNoteId,
-          text: cleanedText,
-          photo_ids: cleanedPhotos,
-          assets: [],
-          created_at: now,
-          updated_at: now,
-        };
-        setNotes((prev) => [newNote, ...prev]);
-        setToast({ type: "success", message: "Note SAV créée." });
-        return;
-      }
-
-      setNotes((prev) =>
-        prev.map((n) =>
-          n.id === activeNoteId
-            ? {
-                ...n,
-                text: cleanedText,
-                photo_ids: cleanedPhotos,
-                updated_at: now,
-              }
-            : n
-        )
+      await fetchSavItem();
+    } catch (e: any) {
+      setReferenceError(
+        e?.message || "Erreur lors de la mise à jour de la référence chantier."
       );
-      setToast({ type: "success", message: "Note SAV mise à jour." });
-      return;
-    }
-
-    const id = uid("note");
-    const newNote: SavNote = {
-      id,
-      text: cleanedText,
-      photo_ids: cleanedPhotos,
-      assets: [],
-      created_at: now,
-      updated_at: now,
-    };
-
-    setNotes((prev) => [newNote, ...prev]);
-    setActiveNoteId(id);
-    setSelectedAssetId(null);
-    setToast({ type: "success", message: "Note SAV créée." });
-  }, [activeNoteId, notePhotos, noteText, notes]);
-
-  const deleteNote = useCallback(
-    (id: string) => {
-      setNotes((prev) => prev.filter((n) => n.id !== id));
-      if (activeNoteId === id) {
-        startNewNote();
-      }
-      setToast({ type: "success", message: "Note supprimée." });
-    },
-    [activeNoteId, startNewNote]
-  );
-
-  // --- Note visual upload ---
-  const handleChooseNoteVisual = useCallback(() => {
-    const el = document.getElementById("note-visual-input") as HTMLInputElement | null;
-    if (el) el.click();
-  }, []);
-
-  const handleNoteVisualChange = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file || !effectiveSessionId) return;
-
-      setUploadingVisual(true);
-      try {
-        // Ensure we have a stable note_id even before saving text
-        let noteId = activeNoteId;
-        if (!noteId) {
-          noteId = uid("note_tmp");
-          setActiveNoteId(noteId);
-        }
-
-        const fd = new FormData();
-        fd.append("file", file);
-
-        const res = await fetch(
-          buildUrl(
-            `/sessions/${encodeURIComponent(effectiveSessionId)}/notes/${encodeURIComponent(
-              noteId
-            )}/assets?kind=${encodeURIComponent("tech_visual")}`
-          ),
-          { method: "POST", body: fd }
-        );
-
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`Upload visuel (${res.status}) : ${txt || "Erreur"}`);
-        }
-
-        const data = (await res.json()) as any;
-        const asset = data?.asset as NoteAsset | undefined;
-        const assetUrlPath = data?.asset_url as string | undefined;
-
-        if (!asset || !asset.asset_id) {
-          throw new Error("Upload OK mais réponse incomplète (asset manquant).");
-        }
-
-        const fullAssetUrl = assetUrlPath
-          ? buildUrl(assetUrlPath)
-          : buildUrl(
-              `/sessions/${encodeURIComponent(effectiveSessionId)}/notes/${encodeURIComponent(
-                noteId
-              )}/assets/${encodeURIComponent(asset.asset_id)}`
-            );
-
-        setNotes((prev) => {
-          const idx = prev.findIndex((n) => n.id === noteId);
-          if (idx === -1) {
-            const now = Math.floor(Date.now() / 1000);
-            const placeholder: SavNote = {
-              id: noteId!,
-              text: noteText || "",
-              photo_ids: notePhotos || [],
-              assets: [{ ...asset, asset_url: fullAssetUrl }],
-              created_at: now,
-              updated_at: now,
-            };
-            return [placeholder, ...prev];
-          }
-
-          const target = prev[idx];
-          const existing = new Map((target.assets || []).map((a) => [a.asset_id, a]));
-          existing.set(asset.asset_id, { ...asset, asset_url: fullAssetUrl });
-
-          const updated: SavNote = {
-            ...target,
-            assets: Array.from(existing.values()),
-            updated_at: Math.floor(Date.now() / 1000),
-          };
-
-          const copy = [...prev];
-          copy[idx] = updated;
-          return copy;
-        });
-
-        // ✅ si aucun visuel sélectionné, on sélectionne celui qu’on vient d’ajouter
-        setSelectedAssetId((prev) => prev || asset.asset_id);
-
-        setToast({ type: "success", message: "Visuel joint téléversé." });
-      } catch (err) {
-        console.error(err);
-        setToast({
-          type: "error",
-          message: (err as any)?.message || "Erreur upload visuel joint.",
-        });
-      } finally {
-        setUploadingVisual(false);
-        e.target.value = "";
-      }
-    },
-    [activeNoteId, effectiveSessionId, noteText, notePhotos]
-  );
-
-  // ✅ suppression d’un visuel (backend + UI)
-  const deleteNoteAsset = useCallback(
-    async (noteId: string, assetId: string) => {
-      if (!effectiveSessionId) return;
-
-      try {
-        const res = await fetch(
-          buildUrl(
-            `/sessions/${encodeURIComponent(effectiveSessionId)}/notes/${encodeURIComponent(
-              noteId
-            )}/assets/${encodeURIComponent(assetId)}`
-          ),
-          { method: "DELETE" }
-        );
-
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`Suppression visuel (${res.status}) : ${txt || "Erreur"}`);
-        }
-
-        // update UI
-        setNotes((prev) =>
-          prev.map((n) =>
-            n.id !== noteId ? n : { ...n, assets: (n.assets || []).filter((a) => a.asset_id !== assetId) }
-          )
-        );
-
-        // si on supprime celui sélectionné, on repointe sur le premier restant
-        setSelectedAssetId((prev) => {
-          if (prev !== assetId) return prev;
-          const n = notes.find((x) => x.id === noteId);
-          const remaining = (n?.assets || []).filter((a) => a.asset_id !== assetId);
-          return remaining[0]?.asset_id || null;
-        });
-
-        setToast({ type: "success", message: "Visuel supprimé." });
-      } catch (err) {
-        console.error(err);
-        setToast({
-          type: "error",
-          message: (err as any)?.message || "Erreur suppression visuel.",
-        });
-      }
-    },
-    [effectiveSessionId, notes]
-  );
-
-  // Current note assets (for preview)
-  const activeNoteAssets = useMemo(() => {
-    if (!activeNoteId) return [];
-    const n = notes.find((x) => x.id === activeNoteId);
-    return (n?.assets || []).filter(Boolean);
-  }, [activeNoteId, notes]);
-
-  // ✅ garder selectedAssetId cohérent quand on change de note / quand liste assets change
-  useEffect(() => {
-    if (!activeNoteId) {
-      setSelectedAssetId(null);
-      return;
-    }
-    if (activeNoteAssets.length === 0) {
-      setSelectedAssetId(null);
-      return;
-    }
-    if (!selectedAssetId || !activeNoteAssets.some((a) => a.asset_id === selectedAssetId)) {
-      setSelectedAssetId(activeNoteAssets[0].asset_id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeNoteId, activeNoteAssets.length]);
-
-  const selectedActiveAsset = useMemo(() => {
-    if (!activeNoteAssets.length) return null;
-    if (selectedAssetId) {
-      return activeNoteAssets.find((a) => a.asset_id === selectedAssetId) || activeNoteAssets[0];
-    }
-    return activeNoteAssets[0];
-  }, [activeNoteAssets, selectedAssetId]);
-
-  const selectedActiveAssetUrl = useMemo(() => {
-    const a = selectedActiveAsset;
-    if (!a) return null;
-    return normalizeApiUrl(a.asset_url) || null;
-  }, [selectedActiveAsset]);
-
-  // --- Publish (⚠️ MVP: on bloque la publication chantier multi-sessions) ---
-  // --- Publish (chantier-first si chantier mode) ---
-  const handlePublish = useCallback(async () => {
-    if (!detail) return;
-
-    // ----------------------------
-    // ✅ CHANTIER-FIRST (nouveau)
-    // ----------------------------
-    if (isChantierMode && chantierMeta.chantier_id) {
-      setPublishing(true);
-      try {
-        const res = await fetch(
-          buildUrl(`/chantiers/${encodeURIComponent(chantierMeta.chantier_id)}/publish`),
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              author: author || "Service Technique",
-            }),
-          }
-        );
-
-        if (!res.ok) {
-          const txt = await res.text();
-          throw new Error(`Erreur publication chantier (${res.status}) : ${txt || "Impossible de publier"}`);
-        }
-
-        const data = (await res.json()) as any;
-
-        // ✅ met à jour le chantier en local pour récupérer publication.report_public_url etc.
-        setChantier((prev) => {
-          const pubPatch = {
-            publication: {
-              ...(prev?.publication || {}),
-              report_public_slug: data?.public_slug || prev?.publication?.report_public_slug,
-              report_public_url: data?.public_url || prev?.publication?.report_public_url,
-              last_published_at: data?.last_published_at || prev?.publication?.last_published_at,
-              last_published_by: data?.last_published_by || prev?.publication?.last_published_by,
-            },
-            updated_at: data?.updated_at || prev?.updated_at,
-          };
-          return prev ? deepMerge(prev as any, pubPatch) : (pubPatch as any);
-        });
-
-        // (Optionnel) tu peux aussi mettre un mini patch sur `detail` si tu veux refléter "Publié" dans le badge status
-
-        // Notify WhatsApp (best-effort)
-        try {
-          const notifyRes = await fetch(buildWebhookUrl("/notify-chantier-published"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chantier_id: chantierMeta.chantier_id,
-              author: author || "Service Technique",
-              public_url: data?.public_url, // optionnel (webhook peut aussi relire chantier.publication.report_public_url)
-            }),
-          });
-
-          if (!notifyRes.ok) {
-            const txt = await notifyRes.text();
-            console.warn("Notify WhatsApp chantier failed:", notifyRes.status, txt);
-          }
-        } catch (notifyErr) {
-          console.error("Erreur envoi WhatsApp chantier:", notifyErr);
-        }
-
-        setToast({ type: "success", message: "Rapport chantier publié." });
-        return;
-      } catch (err) {
-        console.error(err);
-        setToast({
-          type: "error",
-          message: (err as any)?.message || "Erreur lors de la publication chantier.",
-        });
-        return;
-      } finally {
-        setPublishing(false);
-      }
-    }
-
-    // ----------------------------
-    // Legacy: SESSION publish (inchangé)
-    // ----------------------------
-    if (isMultiSessionChantier) {
-      setToast({
-        type: "error",
-        message:
-          "Chantier multi-sessions : publication non supportée pour l’instant. (On affiche bien toutes les photos, mais le rapport reste lié à une session.)",
-      });
-      return;
-    }
-
-    if (!effectiveSessionId) return;
-
-    const photosList = detail.photos || [];
-    const included = photosList.filter((p) => includeMap[p.id] !== false);
-
-    if (!included.length) {
-      setToast({ type: "error", message: "Aucune photo sélectionnée pour le rapport." });
-      return;
-    }
-
-    setPublishing(true);
-
-    try {
-      const payloadItems = included.map((p) => ({
-        photo_id: p.__photo_id || p.id,
-        commentaire: "",
-        annotated_path: null,
-        annotated_url: null,
-      }));
-
-      const res = await fetch(buildUrl(`/sessions/${encodeURIComponent(effectiveSessionId)}/publish`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          author: author || "Service Technique",
-          items: payloadItems,
-        }),
-      });
-
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`Erreur publication (${res.status}) : ${txt || "Impossible de publier"}`);
-      }
-
-      const updated = (await res.json()) as SessionDetail;
-      setDetail(updated);
-
-      // Notify WhatsApp (best-effort)
-      try {
-        await fetch(buildWebhookUrl("/notify-session-published"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_id: effectiveSessionId,
-            author: author || "Service Technique",
-          }),
-        });
-      } catch (notifyErr) {
-        console.error("Erreur envoi WhatsApp:", notifyErr);
-      }
-
-      setToast({ type: "success", message: "Rapport publié." });
-    } catch (err) {
-      console.error(err);
-      setToast({
-        type: "error",
-        message: (err as any)?.message || "Erreur lors de la publication.",
-      });
     } finally {
-      setPublishing(false);
+      setReferenceSaving(false);
     }
-  }, [author, detail, includeMap, effectiveSessionId, isMultiSessionChantier, isChantierMode, chantierMeta.chantier_id]);
+  }, [
+    referenceChantier,
+    referenceChantierFromData,
+    patchChantier,
+    currentUser,
+    fetchSavItem,
+  ]);
 
-  const handlePreviewReport = useCallback(async () => {
-    // ✅ chantier-first : on preview le rapport chantier
-    const chantierUrl = (chantier as any)?.publication?.report_public_url;
-    const chantierSlug = (chantier as any)?.publication?.report_public_slug;
+  const onNumeroSerieSave = useCallback(async () => {
+    const nextValue = (numeroSerie || "").trim();
 
-    if (chantierUrl) {
-      window.open(chantierUrl, "_blank", "noopener,noreferrer");
+    if (nextValue === numeroSerieFromData) {
+      setNumeroSerieError(null);
       return;
     }
-    if (chantierSlug) {
-      window.open(`/r/${chantierSlug}`, "_blank", "noopener,noreferrer");
+
+    setNumeroSerieSaving(true);
+    setNumeroSerieError(null);
+
+    try {
+      await patchChantier({
+        actor: currentUser,
+        context: {
+          numero_serie: nextValue,
+        },
+      });
+
+      await fetchSavItem();
+    } catch (e: any) {
+      setNumeroSerieError(
+        e?.message || "Erreur lors de la mise à jour du numéro de série."
+      );
+    } finally {
+      setNumeroSerieSaving(false);
+    }
+  }, [
+    numeroSerie,
+    numeroSerieFromData,
+    patchChantier,
+    currentUser,
+    fetchSavItem,
+  ]);
+
+  const onInstallateurEmailSave = useCallback(async () => {
+    const nextValue = (installateurEmail || "").trim();
+    const currentValue = (instEmail || "").trim();
+
+    if (nextValue === currentValue) {
+      setInstallateurEmailError(null);
       return;
     }
 
-    // ✅ Preview avant publication (chantier):
-    // Si aucun lien n'existe encore, on le crée côté backend SANS notifier l'installateur.
-    if (isChantierMode && chantierMeta.chantier_id) {
-      try {
-        const resp = await fetch(
-          `${API_BASE}/chantiers/${encodeURIComponent(chantierMeta.chantier_id)}/preview`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ author, actor: currentUser }),
-          }
-        );
+    setInstallateurEmailSaving(true);
+    setInstallateurEmailError(null);
 
-        if (!resp.ok) {
-          const txt = await resp.text().catch(() => "");
-          throw new Error(txt || `Erreur preview (${resp.status})`);
-        }
+    try {
+      await patchChantier({
+        actor: currentUser,
+        context: {
+          installateur: {
+            email: nextValue,
+          },
+        },
+      });
 
-        const data = await resp.json().catch(() => ({} as any));
-        const url = (data as any)?.public_url || (data as any)?.report_public_url;
+      await fetchSavItem();
+    } catch (e: any) {
+      setInstallateurEmailError(
+        e?.message || "Erreur lors de la mise à jour de l’email installateur.",
+      );
+    } finally {
+      setInstallateurEmailSaving(false);
+    }
+  }, [
+    installateurEmail,
+    instEmail,
+    patchChantier,
+    currentUser,
+    fetchSavItem,
+  ]);
 
-        if (!url) {
-          throw new Error("Le backend n'a pas renvoyé de lien public.");
-        }
+  const onInstallateurPhoneSave = useCallback(async () => {
+    const nextValue = (installateurPhone || "").trim();
+    const currentValue = (instPhone || "").trim();
 
-        // cache local (optionnel)
-        setChantier((prev) => {
-          if (!prev) return prev;
-          const pub = (prev as any).publication || {};
-          return {
-            ...(prev as any),
-            publication: {
-              ...pub,
-              report_public_url: url,
-              report_public_slug: (data as any)?.public_slug || pub.report_public_slug,
-            },
-          } as any;
-        });
+    if (nextValue === currentValue) {
+      setInstallateurPhoneError(null);
+      return;
+    }
 
-        window.open(url, "_blank", "noopener,noreferrer");
-        setToast({
-          type: "success",
-          message: "Aperçu prêt (lien créé sans notification).",
-        });
-        return;
-      } catch (err) {
-        console.error(err);
-        setToast({
-          type: "error",
-          message:
-            (err as any)?.message ||
-            "Impossible de générer l’aperçu pour le moment.",
-        });
+    setInstallateurPhoneSaving(true);
+    setInstallateurPhoneError(null);
+
+    try {
+      await patchChantier({
+        actor: currentUser,
+        context: {
+          installateur: {
+            phone: nextValue,
+          },
+        },
+      });
+
+      await fetchSavItem();
+    } catch (e: any) {
+      setInstallateurPhoneError(
+        e?.message || "Erreur lors de la mise à jour du téléphone installateur.",
+      );
+    } finally {
+      setInstallateurPhoneSaving(false);
+    }
+  }, [
+    installateurPhone,
+    instPhone,
+    patchChantier,
+    currentUser,
+    fetchSavItem,
+  ]);
+
+  // ---------------------------
+  // Patch C — CRM autocomplete
+  // ---------------------------
+  const [crmQuery, setCrmQuery] = useState("");
+  const [crmLoading, setCrmLoading] = useState(false);
+  const [crmError, setCrmError] = useState<string | null>(null);
+  const [crmResults, setCrmResults] = useState<CrmCandidate[]>([]);
+  const [crmOpen, setCrmOpen] = useState(false);
+  const crmTimer = useRef<number | null>(null);
+  const crmBoxRef = useRef<HTMLDivElement | null>(null);
+
+  const fetchCrm = useCallback(
+    async (q: string) => {
+      const query = q.trim();
+      if (!query) {
+        setCrmResults([]);
+        setCrmError(null);
         return;
       }
-    }
+      setCrmLoading(true);
+      setCrmError(null);
+      try {
+        const url = `${API_BASE}/contacts/search?q=${encodeURIComponent(query)}`;
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          throw new Error(
+            `Erreur CRM: HTTP ${res.status} — ${txt.slice(0, 160)}`,
+          );
+        }
+        const json = await res.json();
+        const results = (json?.results || []) as CrmCandidate[];
+        setCrmResults(results);
+      } catch (e: any) {
+        setCrmError(e?.message || "Erreur CRM inconnue");
+        setCrmResults([]);
+      } finally {
+        setCrmLoading(false);
+      }
+    },
+    [API_BASE],
+  );
 
-    // legacy session preview (existant)
-    if (detail?.public_url) {
-      window.open(detail.public_url, "_blank", "noopener,noreferrer");
-      return;
-    }
-    if (detail?.public_slug) {
-      const guess = `/sav/public/${detail.public_slug}`;
-      window.open(guess, "_blank", "noopener,noreferrer");
-      return;
-    }
+  useEffect(() => {
+    if (crmTimer.current) window.clearTimeout(crmTimer.current);
+    crmTimer.current = window.setTimeout(() => {
+      void fetchCrm(crmQuery);
+    }, 250);
+    return () => {
+      if (crmTimer.current) window.clearTimeout(crmTimer.current);
+    };
+  }, [crmQuery, fetchCrm]);
 
-    setToast({
-      type: "error",
-      message:
-        "Aucun lien public disponible. Publie une première fois pour générer le rapport.",
-    });
-  }, [detail, chantier, isChantierMode, chantierMeta.chantier_id, author]);
-
-  const toggleNotePhoto = useCallback((pid: string) => {
-    setNotePhotos((prev) => {
-      const set = new Set(prev);
-      if (set.has(pid)) set.delete(pid);
-      else set.add(pid);
-      return Array.from(set);
-    });
+  // Fermer dropdown CRM en cliquant dehors
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!crmBoxRef.current) return;
+      if (!crmBoxRef.current.contains(e.target as Node)) setCrmOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
+  const onSelectCrm = useCallback(
+    async (cand: CrmCandidate) => {
+      setCrmOpen(false);
+      setCrmQuery(cand.display); // feedback visuel
+      try {
+        await patchChantier({
+          actor: currentUser,
+          context: {
+            installateur: {
+              source: "crm",
+              company: cand.company || "",
+              name: cand.name || "",
+              email: cand.email || "",
+              phone: cand.phone || "",
+            },
+          },
+        });
+        await fetchSavItem();
+      } catch (e: any) {
+        setCrmError(e?.message || "Erreur patch CRM");
+      }
+    },
+    [currentUser, fetchSavItem, patchChantier],
+  );
 
-const handleChantierStatusChange = useCallback(
-  async (nextStatus: "A_TRAITER" | "RESOLU") => {
-    if (!isChantierMode || !chantierMeta.chantier_id) return;
+  // ---------------------------
+  // Render
+  // ---------------------------
+  const rightStatusLabel = selected?.statusLabel || "";
+  const rightStatusCode = normalizeStatusCode(get(selectedRaw, "status", "A_TRAITER"));
 
-    // Optimistic UI
-    setChantier((prev) => (prev ? ({ ...(prev as any), status: nextStatus } as any) : prev));
+  return (
+    <div className="min-h-screen bg-neutral-50">
+      {/* Top bar */}
+      <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur">
+        <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="text-lg font-semibold text-neutral-900">
+              Visual Assistant · SAV
+            </div>
 
-    try {
-      // Persist backend (PATCH /chantiers/{id}) – actor est ajouté dans patchChantier
-      await patchChantier({ status: nextStatus });
+            <button
+              type="button"
+              className="hidden rounded-lg bg-neutral-100 px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200 md:inline"
+              onClick={() => setDebugOpen((v) => !v)}
+              title="Afficher/masquer debug"
+            >
+              debug
+            </button>
 
-      setToast({
-        type: "success",
-        message: `Statut mis à jour : ${nextStatus === "RESOLU" ? "Résolu" : "À traiter"}.`,
-      });
-    } catch (err) {
-      console.error(err);
-      setToast({
-        type: "error",
-        message: (err as any)?.message || "Impossible de mettre à jour le statut.",
-      });
-    }
-  },
-  [isChantierMode, chantierMeta.chantier_id, patchChantier]
-);
-
-const handleChantierOwnerChange = useCallback(
-  async (nextOwner: string) => {
-    if (!isChantierMode || !chantierMeta.chantier_id) return;
-
-    // Optimistic UI
-    setChantier((prev) => (prev ? ({ ...(prev as any), owner: nextOwner } as any) : prev));
-
-    try {
-      // Persist backend (PATCH /chantiers/{id}) – actor est ajouté dans patchChantier
-      await patchChantier({ owner: nextOwner });
-
-      setToast({
-        type: "success",
-        message: `Propriétaire mis à jour : ${nextOwner}.`,
-      });
-    } catch (err) {
-      console.error(err);
-      setToast({
-        type: "error",
-        message: (err as any)?.message || "Impossible de mettre à jour le propriétaire.",
-      });
-    }
-  },
-  [isChantierMode, chantierMeta.chantier_id, patchChantier]
-);
-
-return (
-    <main className="min-h-screen bg-neutral-100">
-      {/* Top header */}
-      <header className="border-b bg-white">
-        <div className="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-lg font-semibold text-neutral-900">Visual Assistant</span>
-            <span className="text-xs text-neutral-500">PERGE · SAV</span>
+            {referenceChantierFromData || key ? (
+              <span className="hidden rounded-lg bg-neutral-100 px-2 py-1 text-xs text-neutral-600 md:inline">
+                {referenceChantierFromData || key}
+              </span>
+            ) : null}
           </div>
 
-          <div className="flex items-center gap-3 text-xs">
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-emerald-700 border border-emerald-100">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              {isChantierMode ? humanChantierStatus((chantier as any)?.status) : humanStatus(detail?.status)}
-            </span>
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={() => router.push("/sav/sessions")}
+            >
+              Retour
+            </Button>
 
             <select
-              className="rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-xs text-neutral-800 shadow-sm hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-neutral-400 focus:ring-offset-2"
+              className="h-10 rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50"
               value={currentUser}
-              onChange={(e) => persistCurrentUser(e.target.value)}
-              title="Utilisateur courant (sert à attribuer les activités)"
+              onChange={(e) => setCurrentUser(e.target.value as UserName)}
             >
               {USERS.map((u) => (
                 <option key={u} value={u}>
@@ -1632,1015 +2576,1347 @@ return (
                 </option>
               ))}
             </select>
-
-{isChantierMode && chantierMeta.chantier_id && (
-  <select
-    value={(((chantier as any)?.status || "A_TRAITER") as string).toUpperCase().includes("RESOL") ? "RESOLU" : "A_TRAITER"}
-    onChange={(e) => handleChantierStatusChange(e.target.value as any)}
-    className="rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-xs text-neutral-800 shadow-sm hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-neutral-400 focus:ring-offset-2"
-  >
-    <option value="A_TRAITER">À traiter</option>
-    <option value="RESOLU">Résolu</option>
-  </select>
-)}
-
-            <button
-              type="button"
-              onClick={handlePreviewReport}
-              className="inline-flex items-center justify-center gap-1 rounded-full border border-neutral-300 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-neutral-800 focus:outline-none focus:ring-2 focus:ring-neutral-400 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Aperçu
-            </button>
-
-            <button
-              type="button"
-              onClick={handlePublish}
-              disabled={publishing || !detail || !photos.length}
-              className="inline-flex items-center justify-center rounded-full bg-neutral-900 text-white px-3 py-1.5 text-xs hover:bg-black disabled:opacity-50"
-              title={
-                isMultiSessionChantier
-                  ? "Publication chantier multi-sessions non supportée (MVP)"
-                  : undefined
-              }
-            >
-              {publishing ? "Publication…" : "Publier"}
-            </button>
-
-            <Link
-              href="/sav/sessions"
-              className="text-neutral-500 hover:text-neutral-800 hover:underline"
-            >
-              ← Retour
-            </Link>
           </div>
         </div>
       </header>
 
-      <div className="mx-auto max-w-6xl px-4 py-6 flex flex-col gap-4">
-        {/* Page title */}
-        <div className="flex items-baseline justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-semibold text-neutral-900">Détail session SAV</h1>
-            <p className="text-xs text-neutral-500">
-              ID : <span className="font-mono">{key || "(session inconnue)"}</span>
-              {loadedSessionId && loadedSessionId !== key && (
-                <span className="text-neutral-400">
-                  {" "}
-                  · session : <span className="font-mono">{loadedSessionId}</span>
-                </span>
-              )}
-            </p>
-            {isChantierMode && chantierMeta.chantier_id ? (
-              <div className="mt-2 flex items-center gap-2 text-xs">
-                <span className="text-neutral-500">Propriétaire :</span>
-                <select
-                  className="rounded-lg border border-neutral-300 bg-white px-2 py-1 text-xs"
-                  value={String((chantier as any)?.owner || "Xavier Briffa")}
-                  onChange={(e) => handleChantierOwnerChange(e.target.value)}
-                >
-                  {USERS.map((u) => (
-                    <option key={u} value={u}>
-                      {u}
-                    </option>
-                  ))}
-                </select>
+      <main className="mx-auto max-w-[1400px] px-6 py-6">
+        {/* Debug panel */}
+        {debugOpen && (
+          <div className="mb-4 rounded-2xl bg-white px-5 py-4 text-sm ring-1 ring-neutral-200">
+            <div className="font-semibold text-neutral-900">Debug</div>
+            <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+              <div>
+                <span className="text-neutral-500">API_BASE:</span>{" "}
+                <span className="font-mono text-xs">{API_BASE}</span>
               </div>
-            ) : null}
+              <div>
+                <span className="text-neutral-500">key:</span>{" "}
+                <span className="font-mono text-xs">{key || "—"}</span>
+              </div>
+              <div>
+                <span className="text-neutral-500">kind:</span>{" "}
+                <span className="font-mono text-xs">{String(kind || "")}</span>
+              </div>
+              <div>
+                <span className="text-neutral-500">sav_sessions:</span>{" "}
+                <span className="font-mono text-xs">
+                  {Array.isArray(savSessionsRaw) ? savSessionsRaw.length : "—"}
+                </span>
+              </div>
+              <div>
+                <span className="text-neutral-500">active_sav_session_id:</span>{" "}
+                <span className="font-mono text-xs">
+                  {activeSavSessionId || "—"}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
-
-            {chantierMeta.kind && (
-              <p className="text-[11px] text-neutral-400 mt-1">
-                Type :{" "}
-                {chantierMeta.kind === "chantier" ? "chantier" : "inbox"} · Sessions trouvées :{" "}
-                {chantierMeta.session_count}
-                {isMultiSessionChantier && (
-                  <span className="text-neutral-400">
-                    {" "}
-                    · Photos affichées : agrégées (toutes les sessions)
-                  </span>
-                )}
-              </p>
+        {/* Loading / error */}
+        {(loading || error) && (
+          <div className="mb-4 rounded-2xl bg-white px-5 py-3 text-sm ring-1 ring-neutral-200">
+            {loading ? (
+              <span className="text-neutral-700">Chargement…</span>
+            ) : (
+              <span className="text-red-600">{error}</span>
             )}
           </div>
-        </div>
+        )}
 
-        <section className="bg-white shadow-sm rounded-xl p-4 flex flex-col gap-4">
-          {loading && <div className="text-sm text-neutral-500">Chargement…</div>}
-
-          {!loading && error && (
-            <div className="text-sm text-red-600 whitespace-pre-line">{error}</div>
-          )}
-
-          {!loading && !error && detail && (
-            <>
-              {/* CONTEXTE CHANTIER */}
-              <div className="relative grid grid-cols-1 md:grid-cols-3 gap-4 text-sm pb-3 border-b border-neutral-200">
-                {isChantierMode && (
-                  <div className="absolute right-0 top-0 flex items-center gap-2">
-                    {!isEditingContext ? (
-                      <button
-                        type="button"
-                        onClick={startEditContext}
-                        className="inline-flex items-center justify-center rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs hover:bg-neutral-50"
-                      >
-                        Modifier
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={cancelEditContext}
-                          className="inline-flex items-center justify-center rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs hover:bg-neutral-50"
-                        >
-                          Annuler
-                        </button>
-                        <button
-                          type="button"
-                          onClick={saveEditContext}
-                          className="inline-flex items-center justify-center rounded-full bg-neutral-900 text-white px-3 py-1.5 text-xs hover:bg-black"
-                        >
-                          Enregistrer
-                        </button>
-                      </>
-                    )}
+        {/* Unattached session state */}
+        {kind === "unattached_session" ? (
+          <section className="rounded-2xl bg-white ring-1 ring-neutral-200 shadow-sm">
+            <div className="border-b border-neutral-100 px-5 py-4">
+              <h2 className="text-base font-semibold text-neutral-900">
+                Session non rattachée à un chantier
+              </h2>
+            </div>
+            <div className="px-5 py-4 text-sm text-neutral-700">
+              Cette session WhatsApp existe, mais n’est pas encore liée à un
+              chantier.
+            </div>
+          </section>
+        ) : (
+          <div className="grid grid-cols-12 gap-6">
+            {/* Left column */}
+            <div className="col-span-12 space-y-6 lg:col-span-4">
+              <Card
+                title="Chantier (stable)"
+                right={
+                  <div className="flex items-center gap-2">
+                    <span className="hidden text-xs text-neutral-500 md:inline">
+                      Propriétaire
+                    </span>
+                    <select
+                      className="h-9 rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                      value={owner}
+                      disabled={ownerSaving}
+                      onChange={(e) =>
+                        void onOwnerChange(e.target.value as UserName)
+                      }
+                      title={ownerSaving ? "Enregistrement…" : ""}
+                    >
+                      {USERS.map((u) => (
+                        <option key={u} value={u}>
+                          {u}
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                )}
-
-                <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                    Installateur
+                }
+              >
+                {/* ✅ CRM search */}
+                <div ref={crmBoxRef} className="mb-4">
+                  <div className="text-xs text-neutral-500">
+                    Rechercher installateur (CRM)
                   </div>
-                  {!isEditingContext ? (
-                    <>
-                      <div className="font-medium text-neutral-900">
-                        {displayInstaller.nom || "—"}
-                      </div>
-                      <div className="text-neutral-600">
-                        {displayInstaller.societe || "—"}
-                      </div>
-                      <div className="text-neutral-500 text-xs">
-                        {displayInstaller.phone || "—"}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      <input
-                        value={draftInstallerName}
-                        onChange={(e) => setDraftInstallerName(e.target.value)}
-                        placeholder="Nom"
-                        className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                      />
-                      <input
-                        value={draftInstallerCompany}
-                        onChange={(e) => setDraftInstallerCompany(e.target.value)}
-                        placeholder="Société"
-                        className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                      />
-                      <input
-                        value={draftInstallerPhone}
-                        onChange={(e) => setDraftInstallerPhone(e.target.value)}
-                        placeholder="+33…"
-                        className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                      />
+                  <div className="relative mt-2">
+                    <input
+                      value={crmQuery}
+                      onChange={(e) => {
+                        setCrmQuery(e.target.value);
+                        setCrmOpen(true);
+                      }}
+                      onFocus={() => setCrmOpen(true)}
+                      placeholder="Nom / Société / Email / Téléphone…"
+                      className="h-10 w-full rounded-xl bg-white px-3 text-sm text-neutral-900 ring-1 ring-neutral-200 outline-none focus:ring-2 focus:ring-neutral-300"
+                    />
 
-                      <div className="pt-1">
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                          Recherche CRM
-                        </div>
-                        <div className="relative">
-                          <input
-                            value={crmQuery}
-                            onChange={(e) => setCrmQuery(e.target.value)}
-                            placeholder="Rechercher un contact…"
-                            className="mt-1 w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                          />
-
-                          {(crmLoading || crmResults.length > 0) && (
-                            <div className="absolute z-10 mt-1 w-full bg-white border border-neutral-200 rounded-xl shadow-sm overflow-hidden">
-                              {crmLoading && (
-                                <div className="px-3 py-2 text-xs text-neutral-500">
-                                  Recherche…
-                                </div>
-                              )}
-                              {!crmLoading &&
-                                crmResults.map((c: any) => {
-                                  const label = c?.display || c?.name || c?.nom || c?.full_name || "Contact";
-                                  const company = c?.company || c?.societe || "";
-                                  const phone = c?.phone || c?.numero || c?.mobile || "";
-                                  return (
-                                    <button
-                                      key={String(c?.id || c?.user_id || label + phone)}
-                                      type="button"
-                                      onClick={() => {
-                                        setDraftInstallerName(String(c?.nom || c?.name || c?.full_name || label || ""));
-                                        setDraftInstallerCompany(String(company || ""));
-                                        setDraftInstallerPhone(String(phone || ""));
-                                        setCrmQuery("");
-                                        setCrmResults([]);
-                                      }}
-                                      className="w-full text-left px-3 py-2 hover:bg-neutral-50 text-sm"
-                                    >
-                                      <div className="font-medium text-neutral-900">
-                                        {String(c?.nom || c?.name || c?.full_name || label || "")}
-                                      </div>
-                                      <div className="text-xs text-neutral-600">
-                                        {company || "—"}{phone ? ` · ${phone}` : ""}
-                                      </div>
-                                    </button>
-                                  );
-                                })}
-                              {!crmLoading && crmResults.length === 0 && crmQuery.trim() && (
-                                <div className="px-3 py-2 text-xs text-neutral-500">
-                                  Aucun résultat.
-                                </div>
-                              )}
+                    {/* Dropdown results */}
+                    {crmOpen &&
+                      (crmLoading || crmError || crmResults.length > 0) && (
+                        <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-2xl bg-white shadow-lg ring-1 ring-neutral-200">
+                          {crmLoading && (
+                            <div className="px-4 py-3 text-sm text-neutral-600">
+                              Recherche…
                             </div>
                           )}
-                        </div>
 
-                        <div className="text-[11px] text-neutral-400 mt-1">
-                          Sélection top 5 · source : crm
+                          {crmError && !crmLoading && (
+                            <div className="px-4 py-3 text-sm text-red-600">
+                              {crmError}
+                            </div>
+                          )}
+
+                          {!crmLoading &&
+                            !crmError &&
+                            crmResults.length === 0 &&
+                            crmQuery.trim() && (
+                              <div className="px-4 py-3 text-sm text-neutral-600">
+                                Aucun résultat
+                              </div>
+                            )}
+
+                          {!crmLoading &&
+                            !crmError &&
+                            crmResults.length > 0 && (
+                              <div className="max-h-64 overflow-auto">
+                                {crmResults.map((r, idx) => (
+                                  <button
+                                    key={`${r.email}-${idx}`}
+                                    type="button"
+                                    className="w-full px-4 py-3 text-left text-sm hover:bg-neutral-50"
+                                    onClick={() => void onSelectCrm(r)}
+                                  >
+                                    <div className="font-medium text-neutral-900">
+                                      {r.display}
+                                    </div>
+                                    <div className="mt-1 text-xs text-neutral-500">
+                                      {r.email ? r.email : ""}
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                         </div>
-                      </div>
-                    </div>
-                  )}
+                      )}
+                  </div>
                 </div>
 
-                <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                    Chantier &amp; produit
+                {/* ✅ Stable fields (vides si inconnus) */}
+                <div className="grid grid-cols-2 gap-x-8 gap-y-5">
+                  <div>
+                    <div className="text-xs text-neutral-500">Référence chantier</div>
+
+                    <div className="mt-1">
+                      <input
+                        className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                        value={referenceChantier}
+                        disabled={referenceSaving}
+                        placeholder="Référence chantier..."
+
+                        onChange={(e) => {
+                          setReferenceChantier(e.target.value);
+                          if (referenceError) setReferenceError(null);
+                        }}
+
+                        onBlur={() => void onReferenceChantierSave()}
+
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void onReferenceChantierSave();
+                          }
+                        }}
+                      />
+
+                      {referenceError && (
+                        <div className="mt-1 text-xs text-red-600">
+                          {referenceError}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
-                  {!isEditingContext ? (
-                    <>
-                      <div className="text-neutral-700 text-xs">
-                        <span className="font-medium">Chantier :</span>{" "}
-                        {displayReferenceChantier ||
-                          detail.chantier_id ||
-                          chantierMeta.chantier_id ||
-                          "—"}
-                      </div>
-                      <div className="text-neutral-700 text-xs">
-                        <span className="font-medium">Produit :</span> {displayProductLabel}
-                      </div>
-                      <div className="text-neutral-700 text-xs">
-                        <span className="font-medium">Feuille :</span> {detail.produit?.sheet || "—"}
-                      </div>
-                    </>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      <div>
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                          Référence chantier
-                        </div>
-                        <input
-                          value={draftReferenceChantier}
-                          onChange={(e) => setDraftReferenceChantier(e.target.value)}
-                          placeholder="Ex : Dillabough"
-                          className="mt-1 w-full text-sm text-neutral-900 placeholder:text-neutral-500 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                        />
-                      </div>
+                  <div>
+                    <div className="text-xs text-neutral-500">Produit</div>
+                    <div className="mt-1">
+                      <select
+                        className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                        value={productCode}
+                        disabled={productsLoading || productSaving}
+                        onChange={(e) => void onProductChange(e.target.value)}
+                      >
+                        <option value="">—</option>
+                        {products.map((p) => (
+                          <option key={p.code} value={p.code}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
 
-                      <div>
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                          Produit
+                      {productsError ? (
+                        <div className="mt-1 text-xs text-red-600">
+                          {productsError}
                         </div>
+                      ) : null}
+
+                      {!productsError && productCode && !selectedProductLabel ? (
+                        <div className="mt-1 text-xs text-amber-700">
+                          Produit non reconnu: {productCode}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs text-neutral-500">Numéro de série</div>
+
+                    <div className="mt-1">
+                      <input
+                        className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                        value={numeroSerie}
+                        disabled={numeroSerieSaving}
+                        placeholder="Numéro de série..."
+
+                        onChange={(e) => {
+                          setNumeroSerie(e.target.value);
+                          if (numeroSerieError) setNumeroSerieError(null);
+                        }}
+
+                        onBlur={() => void onNumeroSerieSave()}
+
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void onNumeroSerieSave();
+                          }
+                        }}
+                      />
+
+                      {numeroSerieError && (
+                        <div className="mt-1 text-xs text-red-600">
+                          {numeroSerieError}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <Field label="Installateur" value={installateurLabel} />
+                  <Field label="Contact" value={contactLabel} />
+
+                  <div>
+                    <div className="text-xs text-neutral-500">Email installateur</div>
+
+                    <div className="mt-1">
+                      <input
+                        className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                        value={installateurEmail}
+                        disabled={installateurEmailSaving}
+                        placeholder="Email installateur..."
+                        onChange={(e) => {
+                          setInstallateurEmail(e.target.value);
+                          if (installateurEmailError) setInstallateurEmailError(null);
+                        }}
+                        onBlur={() => void onInstallateurEmailSave()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void onInstallateurEmailSave();
+                          }
+                        }}
+                      />
+
+                      {installateurEmailError && (
+                        <div className="mt-1 text-xs text-red-600">
+                          {installateurEmailError}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs text-neutral-500">Téléphone</div>
+
+                    <div className="mt-1">
+                      <input
+                        className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                        value={installateurPhone}
+                        disabled={installateurPhoneSaving}
+                        placeholder="Téléphone installateur..."
+                        onChange={(e) => {
+                          setInstallateurPhone(e.target.value);
+                          if (installateurPhoneError) setInstallateurPhoneError(null);
+                        }}
+                        onBlur={() => void onInstallateurPhoneSave()}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void onInstallateurPhoneSave();
+                          }
+                        }}
+                      />
+
+                      {installateurPhoneError && (
+                        <div className="mt-1 text-xs text-red-600">
+                          {installateurPhoneError}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </Card>
+
+              <Card
+                title="Sessions SAV"
+                right={
+                  <Button
+                    variant="outline"
+                    onClick={handleCreateSavSession}
+                    disabled={creatingSavSession}
+                  >
+                    {creatingSavSession ? "Création..." : "+ Nouvelle"}
+                  </Button>
+                }
+                className="pb-2"
+              >
+                {createSavSessionError ? (
+                  <div className="mb-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700 ring-1 ring-red-200">
+                    {createSavSessionError}
+                  </div>
+                ) : null}
+                {uiSessions.length ? (
+                  <div className="space-y-3">
+                    {uiSessions.map((s) => {
+                      const displayName = sessionNames[s.id] || "";
+                      return (
+                        <SessionsListItem
+                          key={s.id}
+                          session={s}
+                          isSelected={s.id === selectedId}
+                          isEditing={editingSessionId === s.id}
+                          onClick={() => {
+                            setEditingSessionId(null); // ✅ si on clique ailleurs/une autre session => exit rename
+                            setSelectedId(s.id);
+                          }}
+                          onStartEdit={() => setEditingSessionId(s.id)}
+                          onStopEdit={() => setEditingSessionId(null)}
+                          displayName={displayName}
+                          onRename={(val) => setSessionDisplayName(s.id, val)}
+                          onCommitName={() => commitSessionDisplayName(s.id)}
+                        />
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl bg-neutral-50 px-4 py-3 text-sm text-neutral-600 ring-1 ring-neutral-200">
+                    Aucune session SAV trouvée dans ce chantier.
+                  </div>
+                )}
+              </Card>
+            </div>
+
+            {/* Right column */}
+            <div className="col-span-12 lg:col-span-8">
+              <section className="rounded-2xl bg-white ring-1 ring-neutral-200 shadow-sm">
+                {/* Header inside right card */}
+                <div className="flex flex-col gap-4 border-b border-neutral-100 px-5 py-4 md:flex-row md:items-center md:justify-between">
+                  <div className="flex items-center gap-3 flex-nowrap min-w-0">
+                    <h2 className="text-base font-semibold text-neutral-900">
+                      Session SAV (événement)
+                    </h2>
+                    {selected ? (
+                      <div className="ml-2 text-sm text-neutral-500">
+                        {selected.id} {selected.dateLabel ? `· ${selected.dateLabel}` : ""}
+                      </div>
+                    ) : null}
+                    <select
+                      className={cx(
+                        "h-9 rounded-full px-3 text-xs font-medium border border-transparent",
+                        rightStatusCode === "RESOLU"
+                          ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                          : rightStatusCode === "EN_ATTENTE_INTERNE"
+                            ? "bg-amber-50 text-amber-700 ring-1 ring-amber-200"
+                            : rightStatusCode === "EN_ATTENTE_INSTALLATEUR"
+                              ? "bg-sky-50 text-sky-700 ring-1 ring-sky-200"
+                              : "bg-neutral-100 text-neutral-700 ring-1 ring-neutral-200",
+                        statusSaving ? "opacity-60 cursor-wait" : "cursor-pointer",
+                      )}
+                      value={rightStatusCode}
+                      onChange={(e) => void handleChangeSavSessionStatus(e.target.value)}
+                      disabled={statusSaving || !currentSavSessionId}
+                      title="Modifier le statut de la session SAV"
+                    >
+                      {SAV_STATUS_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => void handlePreviewInstallateur()}
+                      disabled={!currentSavSessionId || previewInstallateurLoading}
+                    >
+                      {previewInstallateurLoading ? "Ouverture..." : "Aperçu installateur"}
+                    </Button>
+                  </div>
+                </div>
+
+                {statusSaveError ? (
+                  <div className="px-5 pt-3">
+                    <div className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700 ring-1 ring-red-200">
+                      {statusSaveError}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="px-5 py-5">
+                  {/* Classification (editable + PATCH) */}
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-neutral-900">
+                        Classification
+                      </h3>
+
+                      <div className="text-xs">
+                        {clsSaveState === "saving" ? (
+                          <span className="text-neutral-500">Enregistrement…</span>
+                        ) : clsSaveState === "saved" ? (
+                          <span className="text-emerald-700">Enregistré</span>
+                        ) : clsSaveState === "error" ? (
+                          <span className="text-red-600">
+                            Erreur{clsSaveError ? `: ${clsSaveError}` : ""}
+                          </span>
+                        ) : (
+                          <span className="text-neutral-400"> </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                      <div>
+                        <div className="mb-2 text-xs text-neutral-500">Catégorie</div>
                         <select
-                          value={draftProductCode}
-                          onChange={(e) => setDraftProductCode(e.target.value)}
-                          className="mt-1 w-full text-sm text-neutral-900 bg-white border border-neutral-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
+                          className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50"
+                          value={clsCategory}
+                          onChange={(e) => {
+                            setClsCategory(e.target.value);
+                            // reset sous-cat si on change la cat
+                            setClsSubCategory("");
+                          }}
                         >
                           <option value="">—</option>
-                          {products.map((p) => (
-                            <option key={p.code} value={p.code}>
-                              {p.label}
+                          {categoryOptions.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
                             </option>
                           ))}
                         </select>
-                        <div className="text-[11px] text-neutral-400 mt-1">
-                          Liste normée · source : /products
-                        </div>
                       </div>
-                    </div>
-                  )}
 
-                  <div className="text-neutral-500 text-[11px]">
-                    Créée : {formatTs(detail.created_at)} · Maj : {formatTs(detail.updated_at)}
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                    Publication
-                  </div>
-                  <div className="text-neutral-700 text-xs">
-                    <span className="font-medium">Dernière :</span>{" "}
-                    {displayLastPublishedAt ? formatTs(displayLastPublishedAt as any) : "—"}
-                  </div>
-                  <div className="text-neutral-700 text-xs">
-                    <span className="font-medium">Par :</span> {(displayLastPublishedBy as any) || "—"}
-                  </div>
-                  <div className="text-neutral-500 text-[11px]">Photos reçues : {photos.length}</div>
-                </div>
-              </div>
-
-              {/* META EDITABLE */}
-              <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,1.2fr)_minmax(0,1fr)] gap-4 items-start">
-                <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
-                    Description installateur
-                  </div>
-                  <input
-                    value={descriptionInstallateur}
-                    onChange={(e) => setDescriptionInstallateur(e.target.value)}
-                    placeholder="Ex : chaudière en défaut, bruit anormal…"
-                    className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                  />
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
-                    Destinataire WhatsApp (modifiable)
-                  </div>
-                  <input
-                    value={reportRecipient}
-                    onChange={(e) => setReportRecipient(e.target.value)}
-                    placeholder="+33…"
-                    className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                  />
-                  <div className="text-[11px] text-neutral-400">Le numéro qui recevra le rapport.</div>
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
-                    N° de série
-                  </div>
-                  <input
-                    value={numeroSerie}
-                    onChange={(e) => setNumeroSerie(e.target.value)}
-                    placeholder="Optionnel"
-                    className="w-full text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                  />
-                </div>
-              </div>
-
-              {/* INPUT STRIP */}
-              <div className="pt-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                    Photos reçues (input)
-                  </div>
-                  <div className="text-[11px] text-neutral-500">
-                    Clique une photo pour prévisualiser · coche “Inclure” pour le rapport
-                  </div>
-                </div>
-
-                <div className="mt-2 overflow-x-auto">
-                  <div className="flex items-start gap-2 min-w-max pb-2">
-                    {photos.map((p) => {
-                      const isSelected = selectedPhoto?.id === p.id;
-                      const isIncluded = includeMap[p.id] !== false;
-
-                      const caption = (() => {
-                        if (!isMultiSessionChantier) return p.__photo_id || p.id;
-                        const sid = p.__session_id ? p.__session_id.slice(-6) : "—";
-                        const pid = p.__photo_id || p.id;
-                        return `${pid} · ${sid}`;
-                      })();
-
-                      return (
-                        <div key={p.id} className="flex flex-col items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedPhotoId(p.id)}
-                            className={[
-                              "w-[92px] h-[64px] rounded-xl overflow-hidden border bg-neutral-50 flex-none",
-                              isSelected ? "border-neutral-900" : "border-neutral-200",
-                            ].join(" ")}
-                            title={`Ouvrir ${p.id}`}
-                          >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={p.url} alt={p.id} className="w-full h-full object-cover" />
-                          </button>
-
-                          <div className="w-[92px] flex items-center justify-between gap-2 px-1">
-                            <div className="text-[10px] text-neutral-600 font-mono truncate" title={caption}>
-                              {caption}
-                            </div>
-
-                            <label className="inline-flex items-center gap-1 text-[10px] text-neutral-600 cursor-pointer select-none">
-                              <input
-                                type="checkbox"
-                                checked={isIncluded}
-                                onChange={() => toggleInclude(p.id)}
-                              />
-                              Inclure
-                            </label>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-
-              {/* MAIN WORK AREA */}
-              <div className="grid grid-cols-1 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4">
-                {/* Left: preview + create/edit note */}
-                <div className="flex flex-col gap-3">
-                  {/* chips line */}
-                  <div className="text-[11px] text-neutral-500">
-                    <span className="font-semibold uppercase tracking-wide text-neutral-400">
-                      Prévisualisation & sélection
-                    </span>
-                    <div className="mt-1 flex flex-wrap items-center gap-1">
-                      {previewChips.length ? (
-                        previewChips.map((pid) => (
-                          <button
-                            key={pid}
-                            type="button"
-                            onClick={() => setSelectedPhotoId(pid)}
-                            className={[
-                              "px-2 py-0.5 rounded-full text-[11px] border",
-                              selectedPhoto?.id === pid
-                                ? "bg-neutral-900 text-white border-neutral-900"
-                                : "bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50",
-                            ].join(" ")}
-                            title="Cliquer pour prévisualiser"
-                          >
-                            {pid}
-                          </button>
-                        ))
-                      ) : (
-                        <span className="text-[11px] text-neutral-500">Aucune photo incluse.</span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* big preview */}
-                  <div className="relative bg-neutral-100 rounded-xl overflow-hidden aspect-[16/10] flex items-center justify-center">
-                    {selectedPhoto ? (
-                      <>
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={selectedPhoto.url} alt={selectedPhoto.id} className="w-full h-full object-contain" />
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setFullscreen({
-                              kind: "photo",
-                              photoUrl: selectedPhoto.url,
-                              title: `Photo ${selectedPhoto.__photo_id || selectedPhoto.id}`,
-                            })
-                          }
-                          className="absolute top-2 right-2 inline-flex items-center justify-center w-8 h-8 rounded-md bg-neutral-900/70 text-neutral-50 text-xs"
-                          title="Plein écran"
-                        >
-                          ⛶
-                        </button>
-                      </>
-                    ) : (
-                      <div className="text-sm text-neutral-600">Aucune photo</div>
-                    )}
-                  </div>
-
-                  {/* NOTE EDITOR */}
-                  <div className="border border-neutral-200 rounded-xl p-3 bg-white">
-                    <div className="flex items-center justify-between gap-2">
                       <div>
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
-                          Réponse / Note SAV (output)
+                        <div className="mb-2 text-xs text-neutral-500">
+                          Sous-catégorie
                         </div>
-                        <div className="text-[11px] text-neutral-500">
-                          Le tech répond au problème. Le visuel est optionnel (un ou plusieurs).
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={startNewNote}
-                        className="inline-flex items-center justify-center rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs hover:bg-neutral-50"
-                      >
-                        + Nouvelle note
-                      </button>
-                    </div>
-
-                    <div className="mt-2 grid grid-cols-1 gap-2">
-                      <textarea
-                        value={noteText}
-                        onChange={(e) => setNoteText(e.target.value)}
-                        placeholder="Écris la recommandation SAV…"
-                        className="w-full min-h-[110px] text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                      />
-
-                      {/* Photo links selector */}
-                      <div className="flex flex-col gap-1">
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                          Photos liées à cette note
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1">
-                          {photos.map((p) => {
-                            const on = notePhotos.includes(p.id);
-                            return (
-                              <button
-                                key={p.id}
-                                type="button"
-                                onClick={() => toggleNotePhoto(p.id)}
-                                className={[
-                                  "px-2 py-0.5 rounded-full text-[11px] border",
-                                  on
-                                    ? "bg-amber-100 border-amber-200 text-amber-900"
-                                    : "bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50",
-                                ].join(" ")}
-                                title="Associer/dissocier"
-                              >
-                                {p.__photo_id || p.id}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Optional visuals */}
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
-                          Visuels joints (optionnels)
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <input
-                            id="note-visual-input"
-                            type="file"
-                            accept="image/*,application/pdf"
-                            className="hidden"
-                            onChange={handleNoteVisualChange}
-                          />
-
-                          <button
-                            type="button"
-                            onClick={handleChooseNoteVisual}
-                            disabled={uploadingVisual}
-                            className="inline-flex items-center justify-center rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs hover:bg-neutral-50 disabled:opacity-50"
-                          >
-                            {uploadingVisual ? "Téléversement…" : "Joindre un visuel"}
-                          </button>
-
-                          {activeNoteAssets.length > 0 && selectedActiveAssetUrl && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setFullscreen({
-                                  kind: "note_visual",
-                                  photoUrl: selectedActiveAssetUrl,
-                                  title: selectedActiveAsset?.filename
-                                    ? `Visuel · ${selectedActiveAsset.filename}`
-                                    : "Visuel joint",
-                                });
-                              }}
-                              className="inline-flex items-center justify-center rounded-full bg-emerald-50 border border-emerald-100 text-emerald-700 px-3 py-1.5 text-xs hover:bg-emerald-100"
-                              title="Voir le visuel sélectionné"
-                            >
-                              Voir visuel
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* assets list (click to select + open fullscreen) */}
-                      {activeNoteAssets.length > 0 && (
-                        <div className="flex flex-wrap items-center gap-1">
-                          {activeNoteAssets.slice(0, 12).map((a) => {
-                            const isSelected = a.asset_id === selectedAssetId;
-                            return (
-                              <div key={a.asset_id} className="relative inline-flex">
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedAssetId(a.asset_id)}
-                                  className={[
-                                    "px-2 py-0.5 rounded-full text-[11px] border flex items-center gap-1",
-                                    isSelected
-                                      ? "bg-emerald-200 border-emerald-300 text-emerald-900"
-                                      : "bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100",
-                                  ].join(" ")}
-                                  title="Sélectionner pour l’aperçu"
-                                >
-                                  {a.filename || a.asset_id}
-                                </button>
-
-                                {/* ✅ croix suppression */}
-                                <button
-                                  type="button"
-                                  onClick={(ev) => {
-                                    ev.stopPropagation();
-                                    if (!activeNoteId) return;
-                                    deleteNoteAsset(activeNoteId, a.asset_id);
-                                  }}
-                                  className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-white border border-emerald-200 text-emerald-900 text-[10px] flex items-center justify-center hover:bg-emerald-50"
-                                  title="Supprimer ce visuel"
-                                >
-                                  ✕
-                                </button>
-                              </div>
-                            );
-                          })}
-
-                          {activeNoteAssets.length > 12 && (
-                            <span className="text-[11px] text-neutral-500">
-                              +{activeNoteAssets.length - 12}
-                            </span>
-                          )}
-                        </div>
-                      )}
-
-                      {/* actions */}
-                      <div className="flex items-center justify-between gap-2 pt-1">
-                        <div className="text-[11px] text-neutral-500">
-                          {activeNoteId ? (
-                            <span>
-                              Édition de la note <span className="font-mono">{activeNoteId}</span>
-                            </span>
-                          ) : (
-                            <span>Création d’une nouvelle note</span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          {activeNoteId && notes.some((n) => n.id === activeNoteId) && (
-                            <button
-                              type="button"
-                              onClick={() => activeNoteId && deleteNote(activeNoteId)}
-                              className="inline-flex items-center justify-center rounded-full border border-red-200 bg-red-50 text-red-700 px-3 py-1.5 text-xs hover:bg-red-100"
-                            >
-                              Supprimer
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            onClick={upsertNote}
-                            className="inline-flex items-center justify-center rounded-full bg-neutral-900 text-white px-3 py-1.5 text-xs hover:bg-black"
-                          >
-                            {activeNoteId ? "Mettre à jour / créer" : "Créer la note"}
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* ✅ visual preview : suit le visuel sélectionné */}
-                      {selectedActiveAssetUrl && (
-                        <div className="mt-1">
-                          <div className="text-[11px] text-neutral-500 mb-1">
-                            Aperçu visuel{selectedActiveAsset?.filename ? ` · ${selectedActiveAsset.filename}` : ""} :
-                          </div>
-
-                          <div className="relative bg-neutral-100 rounded-xl overflow-hidden aspect-[16/6] flex items-center justify-center">
-                            {/* image */}
-                            <img
-                              src={selectedActiveAssetUrl}
-                              alt="Visuel joint"
-                              className="w-full h-full object-contain cursor-zoom-in"
-                              onClick={() =>
-                                setFullscreen({
-                                  kind: "note_visual",
-                                  photoUrl: selectedActiveAssetUrl,
-                                  title: selectedActiveAsset?.filename
-                                    ? `Visuel · ${selectedActiveAsset.filename}`
-                                    : "Visuel joint",
-                                })
-                              }
-                            />
-
-                            {/* bouton plein écran — même UX que photos installateur */}
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setFullscreen({
-                                  kind: "note_visual",
-                                  photoUrl: selectedActiveAssetUrl,
-                                  title: selectedActiveAsset?.filename
-                                    ? `Visuel · ${selectedActiveAsset.filename}`
-                                    : "Visuel joint",
-                                })
-                              }
-                              className="absolute top-2 right-2 inline-flex items-center justify-center w-8 h-8 rounded-md bg-neutral-900/70 text-neutral-50 text-xs hover:bg-neutral-900"
-                              title="Plein écran"
-                            >
-                              ⛶
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* GLOBAL NOTE */}
-                  <div className="border border-neutral-200 rounded-xl p-3 bg-white">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
-                      Note générale SAV (optionnelle)
-                    </div>
-                    <textarea
-                      value={globalSavNote}
-                      onChange={(e) => setGlobalSavNote(e.target.value)}
-                      placeholder="Synthèse globale, avertissements, points à surveiller…"
-                      className="mt-2 w-full min-h-[90px] text-sm text-neutral-900 placeholder:text-neutral-500 border border-neutral-200 rounded-lg px-3 py-2 bg-white outline-none focus:ring-1 focus:ring-neutral-800 focus:border-neutral-800"
-                    />
-                  </div>
-                </div>
-
-                {/* Right: notes list */}
-                <div className="border border-neutral-200 rounded-xl bg-neutral-50 p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                      Notes SAV du chantier
-                    </div>
-                    <div className="text-[11px] text-neutral-500">{notes.length} note(s)</div>
-                  </div>
-
-                  <div className="mt-2 flex flex-col gap-2">
-                    {notes.length === 0 && (
-                      <div className="text-sm text-neutral-600 bg-white border border-neutral-200 rounded-xl p-3">
-                        Aucune note pour le moment. Clique sur <b>Créer la note</b> pour ajouter une recommandation.
-                      </div>
-                    )}
-
-                    {notes.map((n, idx) => {
-                      const isActive = n.id === activeNoteId;
-                      const hasVisual = Boolean((n.assets || []).length);
-
-                      return (
-                        <div
-                          key={n.id}
-                          className={[
-                            "bg-white border rounded-xl p-3",
-                            isActive ? "border-neutral-900" : "border-neutral-200",
-                          ].join(" ")}
+                        <select
+                          className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50"
+                          value={clsSubCategory}
+                          onChange={(e) => setClsSubCategory(e.target.value)}
                         >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="flex flex-col gap-1">
-                              <div className="text-sm font-semibold text-neutral-900">
-                                Note #{notes.length - idx}
-                              </div>
-                              <div className="text-xs text-neutral-600 line-clamp-3 whitespace-pre-line">
-                                {n.text}
-                              </div>
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={() => openNoteForEdit(n.id)}
-                              className="text-xs text-blue-700 hover:underline"
-                            >
-                              Modifier
-                            </button>
-                          </div>
-
-                          <div className="mt-2 flex flex-wrap items-center gap-1">
-                            {(n.photo_ids || []).slice(0, 8).map((pid) => (
-                              <button
-                                key={pid}
-                                type="button"
-                                onClick={() => setSelectedPhotoId(pid)}
-                                className="px-2 py-0.5 rounded-full text-[11px] border bg-amber-100 border-amber-200 text-amber-900 hover:bg-amber-200"
-                                title="Prévisualiser la photo"
-                              >
-                                {pid}
-                              </button>
-                            ))}
-                            {(n.photo_ids || []).length > 8 && (
-                              <span className="text-[11px] text-neutral-500">
-                                +{(n.photo_ids || []).length - 8}
-                              </span>
-                            )}
-                          </div>
-
-                          {hasVisual && (
-                            <div className="mt-2 flex flex-wrap items-center gap-1">
-                              {(n.assets || []).slice(0, 6).map((a) => (
-                                <button
-                                  key={a.asset_id}
-                                  type="button"
-                                  onClick={() => {
-                                    const url = normalizeApiUrl(a.asset_url);
-                                    if (!url) return;
-                                    setFullscreen({
-                                      kind: "note_visual",
-                                      photoUrl: url,
-                                      title: a.filename ? `Visuel · ${a.filename}` : "Visuel joint",
-                                    });
-                                  }}
-                                  className="px-2 py-0.5 rounded-full text-[11px] border bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100"
-                                  title="Ouvrir"
-                                >
-                                  {a.filename || a.asset_id}
-                                </button>
-                              ))}
-                              {(n.assets || []).length > 6 && (
-                                <span className="text-[11px] text-neutral-500">
-                                  +{(n.assets || []).length - 6}
-                                </span>
-                              )}
-                            </div>
-                          )}
-
-                          <div className="mt-2 flex items-center justify-between gap-2">
-                            <span
-                              className={[
-                                "inline-flex items-center rounded-full px-2 py-1 text-[11px] border",
-                                hasVisual
-                                  ? "bg-emerald-50 border-emerald-100 text-emerald-700"
-                                  : "bg-neutral-50 border-neutral-200 text-neutral-600",
-                              ].join(" ")}
-                            >
-                              {hasVisual ? "Visuel(s) joint(s)" : "Texte seul"}
-                            </span>
-
-                            <div className="text-[11px] text-neutral-400">
-                              Maj : {formatTs(n.updated_at)}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-
-              {/* DEBUG (optional) */}
-              <details className="mt-2">
-                <summary className="text-xs text-neutral-500 cursor-pointer">
-                  Debug (JSON session)
-                </summary>
-                <pre className="mt-2 text-[11px] bg-neutral-900 text-neutral-50 rounded-lg p-3 overflow-x-auto max-h-[400px]">
-                  {JSON.stringify({ detail, chantier, chantierMeta }, null, 2)}
-                </pre>
-              </details>
-            </>
-          )}
-        </section>
-      </div>
-
-      {/* Fullscreen modal */}
-      {fullscreen && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center">
-          <div className="bg-neutral-900 rounded-xl max-w-6xl w-[95vw] max-h-[90vh] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 flex-none">
-              <div className="text-sm text-neutral-100">{fullscreen.title}</div>
-              
-
-              <button
-                type="button"
-                onClick={() => setFullscreen(null)}
-                className="text-neutral-300 hover:text-white text-sm"
-              >
-                Fermer ✕
-              </button>
-            </div>
-            <div className="flex-1 bg-black overflow-auto">
-              <div className="min-h-full flex items-center justify-center p-4">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={fullscreen.photoUrl}
-                  alt={fullscreen.title}
-                  className="max-h-[86vh] w-auto object-contain"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Toast */}
-      {toast && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50">
-          <div
-            className={[
-              "rounded-full px-4 py-2 text-xs shadow-lg border",
-              toast.type === "success"
-                ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                : "bg-red-50 border-red-200 text-red-700",
-            ].join(" ")}
-          >
-            {toast.message}
-          </div>
-        </div>
-      )}
-
-      {/* ✅ Historique d’activité (chantier) — tout en bas, repliable */}
-      {isChantierMode ? (
-        <section className="mt-6">
-          <details className="bg-white rounded-xl border border-neutral-200 overflow-hidden">
-            <summary className="cursor-pointer select-none px-4 py-3 flex items-center justify-between">
-              <div className="text-sm font-semibold text-neutral-900">
-                Historique d’activité
-              </div>
-              <div className="text-xs text-neutral-500">
-                {((chantier as any)?.activity_log?.last_activity_at || (chantier as any)?.updated_at) ? (
-                  <>
-                    {formatTs(((chantier as any)?.activity_log?.last_activity_at as any) || (chantier as any)?.updated_at)}
-                    {((chantier as any)?.activity_log?.last_activity_by ? (
-                      <>
-                        {" "}
-                        · {String((chantier as any)?.activity_log?.last_activity_by)}
-                      </>
-                    ) : null)}
-                  </>
-                ) : (
-                  "—"
-                )}
-              </div>
-            </summary>
-
-            <div className="px-4 pb-4">
-              <div className="mt-2 text-xs text-neutral-600">
-                <div>
-                  Dernière activité :{" "}
-                  <span className="font-medium">
-                    {formatTs(((chantier as any)?.activity_log?.last_activity_at as any) || (chantier as any)?.updated_at)}
-                  </span>
-                  {((chantier as any)?.activity_log?.last_activity_by ? (
-                    <>
-                      {" "}
-                      par <span className="font-medium">{String((chantier as any)?.activity_log?.last_activity_by)}</span>
-                    </>
-                  ) : null)}
-                </div>
-              </div>
-
-              <div className="mt-3">
-                {(() => {
-                  const al = (chantier as any)?.activity_log || {};
-                  const events =
-                    (al.events as any[]) ||
-                    (al.activities as any[]) ||
-                    (al.items as any[]) ||
-                    [];
-                  const rows = Array.isArray(events)
-                    ? events.slice().reverse().slice(0, 30)
-                    : [];
-                  if (!rows.length) {
-                    return (
-                      <div className="text-xs text-neutral-500">
-                        Aucune activité enregistrée.
+                          <option value="">—</option>
+                          {subCategoryOptions.map((s) => (
+                            <option key={s} value={s}>
+                              {s}
+                            </option>
+                          ))}
+                        </select>
                       </div>
-                    );
-                  }
-                  return (
-                    <div className="divide-y divide-neutral-100 border border-neutral-200 rounded-lg overflow-hidden">
-                      {rows.map((ev, idx) => {
-                        const ts =
-                          ev.ts ??
-                          ev.at ??
-                          ev.timestamp ??
-                          ev.created_at ??
-                          ev.updated_at ??
-                          null;
-                        const actor =
-                          ev.actor ?? ev.by ?? ev.user ?? ev.author ?? "";
-                        const typ =
-                          ev.type ??
-                          ev.kind ??
-                          ev.action ??
-                          "CHANTIER_UPDATED";
-                        const details =
-                          ev.details ?? ev.patch ?? ev.fields ?? null;
 
-                        return (
-                          <div key={idx} className="px-3 py-2 bg-white">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="font-medium text-neutral-900">
-                                {String(typ)}
-                              </div>
-                              <div className="text-[11px] text-neutral-500">
-                                {formatTs(typeof ts === "number" ? ts : null)}
-                              </div>
+                      <div>
+                        <div className="mb-2 text-xs text-neutral-500">Composant</div>
+
+                        {/* Chips */}
+                        {clsComponents.length > 0 && (
+                          <div className="mb-2 flex flex-wrap gap-2">
+                            {clsComponents.map((c) => (
+                              <span
+                                key={c}
+                                className="inline-flex items-center gap-2 rounded-full bg-neutral-100 px-3 py-1 text-xs font-medium text-neutral-800 ring-1 ring-neutral-200"
+                              >
+                                {c}
+                                <button
+                                  type="button"
+                                  className="text-neutral-500 hover:text-neutral-900"
+                                  onClick={() => removeComponent(c)}
+                                  aria-label={`Retirer ${c}`}
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Input + suggestions */}
+                        <input
+                          className="h-10 w-full rounded-xl bg-white px-3 text-sm text-neutral-900 ring-1 ring-neutral-200 placeholder:text-neutral-400"
+                          placeholder="Ajouter composant…"
+                          value={componentDraft}
+                          list="components_suggestions"
+                          onChange={(e) => setComponentDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              addComponent();
+                            }
+                          }}
+                          onBlur={() => {
+                            // option: auto-ajout si blur avec texte
+                            // addComponent();
+                          }}
+                        />
+                        <datalist id="components_suggestions">
+                          {componentSuggestions.map((c) => (
+                            <option key={c} value={c} />
+                          ))}
+                        </datalist>
+
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            className="h-9 px-3 py-1 text-xs"
+                            onClick={addComponent}
+                            disabled={!componentDraft.trim()}
+                          >
+                            Ajouter
+                          </Button>
+                          <span className="text-xs text-neutral-400">
+                            Entrée pour ajouter
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div className="rounded-2xl bg-neutral-50 p-3 ring-1 ring-neutral-200">
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <div className="text-xs text-neutral-500">Synthèse (optionnel)</div>
+                          <Button
+                            variant="outline"
+                            className="h-8 px-3 py-1 text-xs"
+                            disabled={clsTextSaveState === "saving" || !clsTextDirty}
+                            onClick={() => void saveClassificationTextsNow()}
+                          >
+                            {clsTextSaveState === "saving" ? "Enregistrement…" : "Enregistrer"}
+                          </Button>
+                        </div>
+
+                        <textarea
+                          className="min-h-[110px] w-full rounded-xl bg-white px-3 py-2 text-sm text-neutral-900 ring-1 ring-neutral-200 placeholder:text-neutral-400"
+                          placeholder="Résumer le diagnostic ou la situation…"
+                          value={clsSynthese}
+                          onChange={(e) => {
+                            setClsSynthese(e.target.value);
+                            setClsTextDirty(true);
+                            if (clsTextSaveState !== "idle") {
+                              setClsTextSaveState("idle");
+                              setClsTextSaveError(null);
+                            }
+                          }}
+                        />
+                      </div>
+
+                      <div className="rounded-2xl bg-neutral-50 p-3 ring-1 ring-neutral-200">
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <div className="text-xs text-neutral-500">Symptôme (optionnel)</div>
+                          <Button
+                            variant="outline"
+                            className="h-8 px-3 py-1 text-xs"
+                            disabled={clsTextSaveState === "saving" || !clsTextDirty}
+                            onClick={() => void saveClassificationTextsNow()}
+                          >
+                            {clsTextSaveState === "saving" ? "Enregistrement…" : "Enregistrer"}
+                          </Button>
+                        </div>
+
+                        <textarea
+                          className="min-h-[110px] w-full rounded-xl bg-white px-3 py-2 text-sm text-neutral-900 ring-1 ring-neutral-200 placeholder:text-neutral-400"
+                          placeholder="Décrire le symptôme…"
+                          value={clsSymptom}
+                          onChange={(e) => {
+                            setClsSymptom(e.target.value);
+                            setClsTextDirty(true);
+                            if (clsTextSaveState !== "idle") {
+                              setClsTextSaveState("idle");
+                              setClsTextSaveError(null);
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-2 text-xs">
+                      {clsTextSaveState === "saved" ? (
+                        <span className="text-emerald-700">Texte enregistré</span>
+                      ) : clsTextSaveState === "error" ? (
+                        <span className="text-red-600">
+                          Erreur{clsTextSaveError ? `: ${clsTextSaveError}` : ""}
+                        </span>
+                      ) : (
+                        <span className="text-neutral-400"> </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Note en cours */}
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-neutral-900">Note en cours</h3>
+                      <div className="text-xs text-neutral-400"> </div>
+                    </div>
+
+                    {/* Upload inputs invisibles */}
+                    <input
+                      ref={uploadVisualInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        if (!f) return;
+                        try {
+                          setUploadBusy(true);
+                          await uploadToNote("asset", f);
+                        } catch (err: any) {
+                          setNoteSaveState("error");
+                          setNoteSaveError(err?.message || "Erreur upload visuel");
+                        } finally {
+                          setUploadBusy(false);
+                        }
+                      }}
+                    />
+                    <input
+                      ref={uploadFileInputRef}
+                      type="file"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        if (!f) return;
+                        try {
+                          setUploadBusy(true);
+                          await uploadToNote("file", f);
+                        } catch (err: any) {
+                          setNoteSaveState("error");
+                          setNoteSaveError(err?.message || "Erreur upload fichier");
+                        } finally {
+                          setUploadBusy(false);
+                        }
+                      }}
+                    />
+
+                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-12">
+                      {/* Interlocuteur */}
+                      <div className="md:col-span-4">
+                        <div className="mb-2 text-xs text-neutral-500">Interlocuteur</div>
+                        <select
+                          className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50"
+                          value={noteTarget}
+                          onChange={(e) => {
+                            const nextTarget = e.target.value as NoteTargetCode;
+                            setNoteTarget(nextTarget);
+                            setNoteDirty(true);
+
+                            // ✅ s'assurer que le canal est valide pour ce target
+                            const allowed = NOTE_ALLOWED_CHANNELS_BY_TARGET[nextTarget] || ["NONE"];
+                            if (!allowed.includes(noteChannel)) {
+                              setNoteChannel(allowed[0] as NoteChannelCode); // COMMERCIAL => EMAIL, INTERNE => NONE, etc.
+                            }
+                          }}
+                        >
+                          {NOTE_TARGET_OPTIONS.map((o) => (
+                            <option key={o.code} value={o.code}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Canal */}
+                      <div className="md:col-span-4">
+                        <div className="mb-2 text-xs text-neutral-500">Canal</div>
+                        <select
+                          className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                          value={noteTarget === "INTERNE" ? "NONE" : noteChannel}
+                          disabled={noteTarget === "INTERNE"}
+                          onChange={(e) => {
+                            setNoteChannel(e.target.value as any);
+                            setNoteDirty(true);
+                          }}
+                        >
+                          {NOTE_CHANNEL_OPTIONS
+                            .filter((o) =>
+                              (NOTE_ALLOWED_CHANNELS_BY_TARGET[noteTarget] || ["NONE"]).includes(
+                                o.code as NoteChannelCode
+                              )
+                            )
+                            .map((o) => (
+                              <option key={o.code} value={o.code}>
+                                {o.label}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      {/* Compteurs inclure */}
+                      <div className="md:col-span-4">
+                        <div className="mb-2 text-xs text-neutral-500">Inclure</div>
+                        <div className="flex h-10 items-center justify-between rounded-xl bg-neutral-50 px-3 text-sm text-neutral-900 ring-1 ring-neutral-200">
+                          <span>{includesInputCount} input</span>
+                          <span>{includesOutputCount} output</span>
+                          <span>{includesFileCount} fichier</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Textarea */}
+                    <div className="mt-4">
+                      <textarea
+                        className="min-h-[92px] w-full rounded-xl bg-white px-3 py-2 text-sm text-neutral-900 ring-1 ring-neutral-200 placeholder:text-neutral-400"
+                        placeholder="Écrire la note…"
+                        value={noteText}
+                        onChange={(e) => {
+                          setNoteText(e.target.value);
+                          setNoteDirty(true);
+
+                          if (aiSuggestion || aiState === "error") {
+                            setAiState("idle");
+                            setAiError(null);
+                            setAiSuggestion(null);
+                            setAiSourceText("");
+                          }
+                        }}
+                      />
+                    </div>
+
+                    {/* Panneau temporaire IA */}
+                    {(aiState === "error" || aiSuggestion) ? (
+                      <div className="mt-4 rounded-2xl bg-neutral-50 p-4 ring-1 ring-neutral-200">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-neutral-900">Proposition IA</div>
+                            <div className="mt-1 text-xs text-neutral-500">
+                              Vérifie la proposition avant de l’appliquer à la note.
                             </div>
-                            <div className="mt-0.5 text-[11px] text-neutral-600">
-                              {actor ? (
-                                <>
-                                  par{" "}
-                                  <span className="font-medium">
-                                    {String(actor)}
-                                  </span>
-                                </>
-                              ) : (
-                                "—"
-                              )}
+                          </div>
+
+                          {aiSuggestion?.severity ? (
+                            <Pill
+                              tone={
+                                aiSuggestion.severity === "ok"
+                                  ? "success"
+                                  : aiSuggestion.severity === "warning"
+                                    ? "warning"
+                                    : "neutral"
+                              }
+                            >
+                              {aiSuggestion.severity === "ok"
+                                ? "OK"
+                                : aiSuggestion.severity === "warning"
+                                  ? "Warning"
+                                  : "Infos manquantes"}
+                            </Pill>
+                          ) : null}
+                        </div>
+
+                        {aiError ? (
+                          <div className="mt-4 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700 ring-1 ring-red-200">
+                            {aiError}
+                          </div>
+                        ) : null}
+
+                        {!aiError && aiSourceText ? (
+                          <div className="mt-4">
+                            <div className="mb-2 text-xs text-neutral-500">Texte actuel</div>
+                            <div className="whitespace-pre-wrap rounded-xl bg-white px-3 py-3 text-sm text-neutral-800 ring-1 ring-neutral-200">
+                              {aiSourceText || <span className="text-neutral-400">—</span>}
                             </div>
-                            {details ? (
-                              <pre className="mt-2 text-[11px] whitespace-pre-wrap break-words bg-neutral-50 border border-neutral-200 rounded p-2 text-neutral-700">
-                                {JSON.stringify(details, null, 2)}
-                              </pre>
+                          </div>
+                        ) : null}
+
+                        {!aiError && aiSuggestion?.suggested_body ? (
+                          <div className="mt-4">
+                            <div className="mb-2 text-xs text-neutral-500">Proposition IA</div>
+                            <div className="whitespace-pre-wrap rounded-xl bg-white px-3 py-3 text-sm text-neutral-900 ring-1 ring-neutral-200">
+                              {aiSuggestion.suggested_body}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {!aiError && aiSuggestion?.explanation ? (
+                          <div className="mt-4 text-sm text-neutral-700">{aiSuggestion.explanation}</div>
+                        ) : null}
+
+                        {!aiError && aiSuggestion?.warnings?.length ? (
+                          <div className="mt-4 rounded-xl bg-amber-50 px-3 py-3 ring-1 ring-amber-200">
+                            <div className="text-xs font-semibold text-amber-800">Warnings</div>
+                            <ul className="mt-2 space-y-1 text-sm text-amber-800">
+                              {aiSuggestion.warnings.map((w, idx) => (
+                                <li key={`${w}-${idx}`}>• {w}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        {!aiError && aiSuggestion?.missing_info?.length ? (
+                          <div className="mt-4 rounded-xl bg-red-50 px-3 py-3 ring-1 ring-red-200">
+                            <div className="text-xs font-semibold text-red-800">Informations manquantes</div>
+                            <ul className="mt-2 space-y-1 text-sm text-red-800">
+                              {aiSuggestion.missing_info.map((m, idx) => (
+                                <li key={`${m}-${idx}`}>• {m}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+
+                        <div className="mt-4 flex items-center gap-2">
+                          {aiSuggestion?.can_generate && aiSuggestion?.suggested_body ? (
+                            <Button
+                              variant="solid"
+                              className="h-9 px-4 text-xs"
+                              onClick={handleApplyAiSuggestion}
+                            >
+                              Appliquer
+                            </Button>
+                          ) : null}
+
+                          <Button
+                            variant="outline"
+                            className="h-9 px-4 text-xs"
+                            onClick={handleCancelAiSuggestion}
+                          >
+                            Annuler
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Ligne actions (upload à gauche, enregistrer à droite) */}
+                      <div className="mt-3 flex items-center justify-between gap-3">
+                        {/* Gauche */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            variant="outline"
+                            className="h-9 px-3 py-1 text-xs"
+                            disabled={uploadBusy}
+                            onClick={() => uploadVisualInputRef.current?.click()}
+                          >
+                            Uploader visuel
+                          </Button>
+
+                          <Button
+                            variant="outline"
+                            className="h-9 px-3 py-1 text-xs"
+                            disabled={uploadBusy}
+                            onClick={() => uploadFileInputRef.current?.click()}
+                          >
+                            Uploader fichier
+                          </Button>
+
+                          <Button
+                            variant="outline"
+                            className="h-9 px-3 py-1 text-xs"
+                            disabled={uploadBusy || aiState === "loading" || !currentSavSessionId}
+                            onClick={() => void handleImproveWithAi()}
+                          >
+                            {aiState === "loading" ? "IA..." : "Améliorer avec IA"}
+                          </Button>
+
+                          {uploadBusy ? (
+                            <span className="text-xs text-neutral-500">Upload…</span>
+                          ) : null}
+                        </div>
+
+                        {/* Droite (zone verte) */}
+                        <div className="flex items-start gap-3">
+                          <Button
+                            className="h-9 px-4 text-xs"
+                            disabled={uploadBusy || !noteDirty || noteSaveState === "saving"}
+                            onClick={saveNoteNow}
+                          >
+                            Enregistrer
+                          </Button>
+
+                          <Button
+                            variant="solid"
+                            className="h-9 px-4 text-xs"
+                            disabled={
+                              uploadBusy ||
+                              noteSaveState === "saving" ||
+                              notePublishState === "publishing" ||
+                              noteChannel === "NONE" ||
+                              !noteChannel
+                            }
+                            onClick={() => void publishNoteNow()}
+                          >
+                            {notePublishState === "publishing" ? "Publication…" : "Publier"}
+                          </Button>
+
+                          {/* Status compact sous les boutons */}
+                          <div className="flex flex-col items-end gap-1 pt-1 text-xs">
+                            {noteSaveState === "saving" ? (
+                              <span className="text-neutral-500">Enregistrement…</span>
+                            ) : noteSaveState === "saved" ? (
+                              <span className="text-emerald-700">Enregistré</span>
+                            ) : noteSaveState === "error" ? (
+                              <span className="text-red-600">
+                                Erreur{noteSaveError ? `: ${noteSaveError}` : ""}
+                              </span>
+                            ) : noteDirty ? (
+                              <span className="text-neutral-500">Non enregistré</span>
+                            ) : (
+                              <span className="text-neutral-400"> </span>
+                            )}
+
+                            {notePublishState === "published" ? (
+                              <span className="text-emerald-700">Publié</span>
+                            ) : notePublishState === "error" ? (
+                              <span className="text-red-600">
+                                {notePublishError ? `Erreur: ${notePublishError}` : "Erreur publication"}
+                              </span>
+                            ) : noteTarget === "INTERNE" ? (
+                              <span className="text-neutral-500">Publication désactivée (Interne)</span>
                             ) : null}
                           </div>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
-          </details>
-        </section>
-      ) : null}
+                        </div>
+                      </div>
+                  </div>
 
+                  <div className="my-6 border-t border-neutral-100" />
+
+                  {/* Visuels & fichiers */}
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-neutral-900">Visuels & fichiers</h3>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className={cx(
+                            "h-9 rounded-xl px-3 text-xs font-medium ring-1 ring-neutral-200",
+                            vfTab === "input" ? "bg-neutral-900 text-white" : "bg-white text-neutral-900 hover:bg-neutral-50",
+                          )}
+                          onClick={() => setVfTab("input")}
+                        >
+                          Visuels input
+                        </button>
+                        <button
+                          type="button"
+                          className={cx(
+                            "h-9 rounded-xl px-3 text-xs font-medium ring-1 ring-neutral-200",
+                            vfTab === "output" ? "bg-neutral-900 text-white" : "bg-white text-neutral-900 hover:bg-neutral-50",
+                          )}
+                          onClick={() => setVfTab("output")}
+                        >
+                          Visuels output
+                        </button>
+                        <button
+                          type="button"
+                          className={cx(
+                            "h-9 rounded-xl px-3 text-xs font-medium ring-1 ring-neutral-200",
+                            vfTab === "files" ? "bg-neutral-900 text-white" : "bg-white text-neutral-900 hover:bg-neutral-50",
+                          )}
+                          onClick={() => setVfTab("files")}
+                        >
+                          Fichiers
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* TAB: Visuels input */}
+                    {vfTab === "input" ? (
+                      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
+                        {/* Preview */}
+                        <div className="lg:col-span-8">
+                          <div className="relative flex h-[360px] items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200">
+                            {activePhoto?.url ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => setIsPhotoFullscreenOpen(true)}
+                                  className="absolute right-3 top-3 rounded-xl bg-white/90 px-3 py-2 text-xs font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-white"
+                                  title="Ouvrir en plein écran"
+                                >
+                                  ⤢
+                                </button>
+
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={activePhoto.url}
+                                  alt="Photo"
+                                  className="h-full w-full object-contain"
+                                />
+                              </>
+                            ) : selectedPhotos.length ? (
+                              <div className="text-sm text-neutral-400">
+                                Photo introuvable (uid: {activePhotoUid || "—"})
+                              </div>
+                            ) : (
+                              <div className="text-sm text-neutral-400">
+                                Aucune photo pour cette session
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Thumbnails + checkbox Inclure */}
+                        <div className="lg:col-span-4">
+                          <div className="mb-2 text-sm font-semibold text-neutral-900">
+                            {selectedPhotos.length} photo{selectedPhotos.length > 1 ? "s" : ""}
+                          </div>
+
+                          {selectedPhotos.length ? (
+                            <div className="space-y-3">
+                              {selectedPhotos.map((ph) => {
+                                const isActive = ph.uid === activePhotoUid;
+                                const isIncluded = includedInputUids.includes(ph.uid);
+
+                                return (
+                                  <div key={ph.uid} className="flex items-stretch gap-2">
+                                    <button
+                                      type="button"
+                                      className={cx(
+                                        "flex h-[78px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200",
+                                        isActive
+                                          ? "ring-2 ring-indigo-200 bg-indigo-50"
+                                          : "hover:bg-neutral-100",
+                                      )}
+                                      onClick={() => setActivePhotoUid(ph.uid)}
+                                      title={ph.uid}
+                                    >
+                                      {ph.url ? (
+                                        // eslint-disable-next-line @next/next/no-img-element
+                                        <img
+                                          src={ph.url}
+                                          alt="Miniature"
+                                          className="h-full w-full object-cover"
+                                        />
+                                      ) : (
+                                        <div className="px-2 text-center text-xs text-neutral-400">
+                                          Pas d’URL
+                                          <div className="mt-1 break-all">{ph.uid}</div>
+                                        </div>
+                                      )}
+                                    </button>
+
+                                    <label className="flex w-[92px] flex-col items-center justify-center gap-1 rounded-2xl bg-white px-2 ring-1 ring-neutral-200">
+                                      <input
+                                        type="checkbox"
+                                        checked={isIncluded}
+                                        onChange={() => toggleInclude("input", ph.uid)}
+                                      />
+                                      <span className="text-[11px] text-neutral-700">Inclure</span>
+                                    </label>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div className="h-[78px] rounded-2xl bg-neutral-50 ring-1 ring-neutral-200" />
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* TAB: Visuels output */}
+                      {vfTab === "output" ? (
+                        <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
+                          {/* Preview */}
+                          <div className="lg:col-span-8">
+                            <div className="relative flex h-[360px] items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200">
+                              {activeOutputAsset?.url ? (
+                                <>
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={activeOutputAsset.url}
+                                    alt="Visuel output"
+                                    className="h-full w-full object-contain"
+                                  />
+                                </>
+                              ) : availableOutputAssets.length ? (
+                                <div className="text-sm text-neutral-400">
+                                  Visuel introuvable (asset: {activeOutputAssetId || "—"})
+                                </div>
+                              ) : (
+                                <div className="text-sm text-neutral-400">
+                                  Aucun visuel output disponible (upload via une note).
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Liste + checkbox Inclure */}
+                          <div className="lg:col-span-4">
+                            <div className="mb-2 text-sm font-semibold text-neutral-900">
+                              {availableOutputAssets.length} visuel{availableOutputAssets.length > 1 ? "s" : ""}
+                            </div>
+
+                            {availableOutputAssets.length ? (
+                              <div className="space-y-3">
+                                {availableOutputAssets.map((a) => {
+                                  const isActive = a.assetId === activeOutputAssetId;
+                                  const isIncluded = includedOutputAssetIds.includes(a.assetId);
+
+                                  return (
+                                    <div key={a.assetId} className="flex items-stretch gap-2">
+                                      <button
+                                        type="button"
+                                        className={cx(
+                                          "flex h-[78px] flex-1 items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200",
+                                          isActive ? "ring-2 ring-indigo-200 bg-indigo-50" : "hover:bg-neutral-100",
+                                        )}
+                                        onClick={() => setActiveOutputAssetId(a.assetId)}
+                                        title={a.assetId}
+                                      >
+                                        {a.url ? (
+                                          // eslint-disable-next-line @next/next/no-img-element
+                                          <img src={a.url} alt="Miniature output" className="h-full w-full object-cover" />
+                                        ) : (
+                                          <div className="px-2 text-center text-xs text-neutral-400">
+                                            Pas d’URL
+                                          </div>
+                                        )}
+                                      </button>
+
+                                      <label className="flex w-[92px] flex-col items-center justify-center gap-1 rounded-2xl bg-white px-2 ring-1 ring-neutral-200">
+                                        <input
+                                          type="checkbox"
+                                          checked={isIncluded}
+                                          onChange={() => toggleInclude("output", a.assetId)}
+                                        />
+                                        <span className="text-[11px] text-neutral-700">Inclure</span>
+                                      </label>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <div className="h-[78px] rounded-2xl bg-neutral-50 ring-1 ring-neutral-200" />
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+
+                    {/* TAB: Fichiers */}
+                    {vfTab === "files" ? (
+                      <div className="mt-4">
+                        {availableFiles.length ? (
+                          <div className="space-y-3">
+                            {availableFiles.map((f) => {
+                              const included = includedFileIds.includes(f.fileId);
+                              return (
+                                <div
+                                  key={f.fileId}
+                                  className="flex items-center justify-between gap-3 rounded-2xl bg-white p-3 ring-1 ring-neutral-200"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="truncate text-sm font-medium text-neutral-900">
+                                      {f.name}
+                                    </div>
+                                    <div className="mt-0.5 text-xs text-neutral-500">
+                                      Document
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-3">
+                                    <a
+                                      href={f.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-xs font-medium text-neutral-900 underline"
+                                    >
+                                      Ouvrir
+                                    </a>
+
+                                    <label className="flex items-center gap-2 text-xs text-neutral-700">
+                                      <input
+                                        type="checkbox"
+                                        checked={included}
+                                        onChange={() => toggleInclude("file", f.fileId)}
+                                      />
+                                      Inclure
+                                    </label>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="rounded-2xl bg-neutral-50 px-4 py-6 text-sm text-neutral-500 ring-1 ring-neutral-200">
+                            Aucun fichier disponible (upload via une note).
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="my-6 border-t border-neutral-100" />
+
+                  {/* Historique des notes */}
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-neutral-900">Historique des notes</h3>
+                        <div className="mt-1 text-xs text-neutral-500">
+                          Timeline — plus lisible quand il y a beaucoup de notes.
+                        </div>
+                      </div>
+
+                      <Button
+                        variant="outline"
+                        className="h-9 px-3 py-1 text-xs"
+                        onClick={createNewDraftNote}
+                      >
+                        + Nouvelle note
+                      </Button>
+                    </div>
+
+                    <div className="mt-4 space-y-3">
+                      {uiNotesHistory.length ? (
+                        uiNotesHistory.map((n, idx) => {
+                          const isActive = n.id === activeNoteId;
+
+                          const excerpt = (n.text || "").trim();
+                          const short =
+                            excerpt.length > 140 ? `${excerpt.slice(0, 140)}…` : excerpt;
+
+                          return (
+                            <div
+                              key={n.id}
+                              className={cx(
+                                "rounded-2xl bg-white p-4 ring-1 shadow-sm",
+                                isActive ? "ring-indigo-200 bg-indigo-50/40" : "ring-neutral-200",
+                              )}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <div className="text-sm font-semibold text-neutral-900">
+                                      Note {uiNotesHistory.length - idx}
+                                    </div>
+
+                                    <Pill tone="neutral">{n.target}</Pill>
+                                    <Pill tone="neutral">{n.channel}</Pill>
+                                    <Pill tone={noteStatusTone(n.statusCode)}>{n.statusCode}</Pill>
+
+                                    {n.dateLabel ? (
+                                      <span className="ml-1 text-xs text-neutral-500">
+                                        {n.dateLabel}
+                                      </span>
+                                    ) : null}
+                                  </div>
+
+                                  <div className="mt-2 text-sm text-neutral-900">
+                                    {short || <span className="text-neutral-400">—</span>}
+                                  </div>
+
+                                  <div className="mt-2 text-xs text-neutral-500">
+                                    Inclut: {n.inputCount} input · {n.outputCount} output · {n.fileCount} fichier
+                                  </div>
+                                </div>
+
+                                <div className="flex shrink-0 items-center gap-2">
+                                  <Button
+                                    variant="outline"
+                                    className="h-9 px-3 py-1 text-xs"
+                                    onClick={() => setActiveNoteId(n.id)}
+                                  >
+                                    Réouvrir
+                                  </Button>
+
+                                  <Button
+                                    variant="outline"
+                                    className="h-9 px-3 py-1 text-xs"
+                                    disabled
+                                    onClick={() => {}}
+                                  >
+                                    Dupliquer
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="rounded-2xl bg-neutral-50 px-4 py-6 text-sm text-neutral-500 ring-1 ring-neutral-200">
+                          Aucune note pour cette session.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="h-2" />
+                </div>
+              </section>
+            </div>
+          </div>
+        )}
       </main>
+      {isPhotoFullscreenOpen && fullscreenUrl ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
+          <button
+            type="button"
+            onClick={() => setIsPhotoFullscreenOpen(false)}
+            className="absolute right-6 top-6 rounded-xl bg-white px-3 py-2 text-sm font-medium text-neutral-900"
+          >
+            Fermer
+          </button>
+
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={fullscreenUrl}
+            alt="Photo plein écran"
+            className="max-h-[90vh] max-w-[92vw] rounded-2xl bg-white object-contain"
+          />
+        </div>
+      ) : null}
+    </div>
   );
 }

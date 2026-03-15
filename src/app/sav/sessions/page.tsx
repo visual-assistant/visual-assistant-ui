@@ -26,6 +26,7 @@ const buildUrl = (
 type ChantierAggItem = {
   group_key: string;
   chantier_id?: string | null;
+  chantier_label?: string | null;
 
   // Affichage liste: nom installateur (context.societe / context.installateur.company)
   installateur?: string | null;
@@ -60,6 +61,14 @@ type SavOverviewResponse = {
   unattached_groups: ChantierAggItem[];
 };
 
+type SavSessionLite = {
+  sav_session_id: string;
+  title?: string | null;
+  created_at?: number | null;
+  updated_at?: number | null;
+  status?: string | null;
+};
+
 function formatTs(ts?: number | null) {
   if (!ts) return "-";
   try {
@@ -71,14 +80,14 @@ function formatTs(ts?: number | null) {
 
 function statusLabel(st?: string) {
   const s = (st || "").toUpperCase();
-  // Nouveau modèle
   if (s === "A_TRAITER") return "À traiter";
+  if (s === "EN_ATTENTE_INTERNE") return "En attente interne";
+  if (s === "EN_ATTENTE_INSTALLATEUR") return "En attente installateur";
   if (s === "RESOLU") return "Résolu";
 
   // Legacy / compat
   if (s === "PUBLIE") return "Publié";
   if (st === "Publié") return "Publié";
-
   if (st === "À revoir") return "À revoir";
   if (st === "Nouveau") return "Nouveau";
   return st || "—";
@@ -86,26 +95,34 @@ function statusLabel(st?: string) {
 
 function statusPillClass(st?: string) {
   const s = (st || "").toUpperCase();
+
   if (s === "RESOLU") return "bg-emerald-100 text-emerald-700";
+  if (s === "EN_ATTENTE_INTERNE") return "bg-amber-100 text-amber-700";
+  if (s === "EN_ATTENTE_INSTALLATEUR") return "bg-sky-100 text-sky-700";
+
   // legacy
   if (s === "PUBLIE" || st === "Publié")
     return "bg-emerald-100 text-emerald-700";
 
   if (s === "A_TRAITER" || st === "Nouveau")
     return "bg-neutral-100 text-neutral-700";
+
   if (st === "À revoir") return "bg-amber-100 text-amber-700";
   return "bg-neutral-100 text-neutral-700";
 }
 
 function normalizeStatusForFilter(st?: string) {
   const s = (st || "").toString().trim().toUpperCase();
-  // on considère l'ancien "PUBLIE" comme "RESOLU" pour les filtres
   if (s === "PUBLIE") return "RESOLU";
+  if (s === "EN_ATTENTE_INTERNE") return "EN_ATTENTE_INTERNE";
+  if (s === "EN_ATTENTE_INSTALLATEUR") return "EN_ATTENTE_INSTALLATEUR";
   return s;
 }
 
 const STATUS_OPTIONS = [
   { value: "A_TRAITER", label: "À traiter" },
+  { value: "EN_ATTENTE_INTERNE", label: "En attente interne" },
+  { value: "EN_ATTENTE_INSTALLATEUR", label: "En attente installateur" },
   { value: "RESOLU", label: "Résolu" },
 ] as const;
 
@@ -125,6 +142,7 @@ const SEEN_STORAGE_KEY = "sav_sessions_seen_sig_v1";
 // ✅ user dropdown
 const CURRENT_USER_STORAGE_KEY = "sav_current_user_v1";
 const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge"] as const;
+const DEFAULT_SAV_SESSION_ID = "SAV-001";
 
 function normalizeStr(v: any) {
   return String(v || "").trim().toLowerCase();
@@ -154,6 +172,16 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   const participants = c?.participants || {};
   const context = c?.context || {};
 
+  const chantierLabel =
+    (
+      context?.reference_chantier ??
+      c?.title ??
+      c?.nom_chantier ??
+      chantierId
+    )
+      ?.toString()
+      .trim() || chantierId;
+
   // Installateur / société
   const installerCompany =
     (context?.societe ??
@@ -179,12 +207,30 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   const photosArr: any[] = Array.isArray(inputs?.photos) ? inputs.photos : [];
 
   // statut : on prend ce qui existe, sinon fallback A_TRAITER
+  const savSessions: any[] = Array.isArray(c?.sav?.sav_sessions) ? c.sav.sav_sessions : [];
+  const savStatuses = savSessions
+    .map((s) => String(s?.status || "").trim().toUpperCase())
+    .filter(Boolean);
+
+  const derivedStatus =
+    savStatuses.includes("A_TRAITER")
+      ? "A_TRAITER"
+      : savStatuses.includes("EN_ATTENTE_INTERNE")
+        ? "EN_ATTENTE_INTERNE"
+        : savStatuses.includes("EN_ATTENTE_INSTALLATEUR")
+          ? "EN_ATTENTE_INSTALLATEUR"
+          : savStatuses.length
+            ? "RESOLU"
+            : null;
+
   const st =
+    derivedStatus ||
     (c?.status ??
       c?.meta?.status ??
       c?.context?.status ??
       c?.links?.status ??
-      "") || "A_TRAITER";
+      "") ||
+    "A_TRAITER";
 
   // numéros
   const knownPhones: string[] = Array.isArray(participants?.known_phones)
@@ -206,6 +252,7 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
   return {
     group_key: chantierId, // important: clé utilisée dans l’URL
     chantier_id: chantierId,
+    chantier_label: chantierLabel,
     installateur: installer ? String(installer).trim() : null,
     status: st,
     type: "chantier",
@@ -358,6 +405,14 @@ export default function SavSessionsListPage() {
   const [attachSelectedChantierId, setAttachSelectedChantierId] =
     useState<string>("");
   const [attachNewChantierId, setAttachNewChantierId] = useState<string>("");
+  const [attachCreateNewSav, setAttachCreateNewSav] = useState<boolean>(true);
+  const [attachSavSessions, setAttachSavSessions] = useState<SavSessionLite[]>([]);
+  const [attachSelectedSavSessionId, setAttachSelectedSavSessionId] = useState<string>("");
+  // création chantier autonome
+  const [createChantierOpen, setCreateChantierOpen] = useState(false);
+  const [createChantierId, setCreateChantierId] = useState<string>("");
+  const [createChantierLoading, setCreateChantierLoading] = useState(false);
+  const [createChantierError, setCreateChantierError] = useState<string | null>(null);
 
   // suppression
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
@@ -495,7 +550,13 @@ export default function SavSessionsListPage() {
     const chantierId =
       (attachSelectedChantierId || "").trim() ||
       (attachNewChantierId || "").trim();
-    return Boolean(attachTarget && attachSessionId && chantierId);
+    const needsExistingSav =
+      !attachCreateNewSav && (attachSelectedChantierId || "").trim();
+
+    const okSav =
+      attachCreateNewSav || !needsExistingSav || Boolean((attachSelectedSavSessionId || "").trim());
+
+    return Boolean(attachTarget && attachSessionId && chantierId && okSav);
   }, [
     attachTarget,
     attachSessionId,
@@ -645,6 +706,9 @@ export default function SavSessionsListPage() {
     setAttachError(null);
     setAttachSelectedChantierId("");
     setAttachNewChantierId("");
+    setAttachCreateNewSav(true);
+    setAttachSavSessions([]);
+    setAttachSelectedSavSessionId("");
   };
 
   const closeAttachModal = () => {
@@ -656,6 +720,9 @@ export default function SavSessionsListPage() {
     setAttachError(null);
     setAttachSelectedChantierId("");
     setAttachNewChantierId("");
+    setAttachCreateNewSav(true);
+    setAttachSavSessions([]);
+    setAttachSelectedSavSessionId("");
   };
 
   const searchChantiersForAttach = async () => {
@@ -707,6 +774,52 @@ export default function SavSessionsListPage() {
     }
   };
 
+  const loadSavSessionsForChantier = async (chantierId: string) => {
+    const id = (chantierId || "").trim();
+    if (!id) {
+      setAttachSavSessions([]);
+      setAttachSelectedSavSessionId("");
+      return;
+    }
+
+    try {
+      const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(id)}`), {
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        setAttachSavSessions([]);
+        setAttachSelectedSavSessionId("");
+        return;
+      }
+
+      const chantier = await res.json();
+      const sav = chantier?.sav || {};
+      const sessions = Array.isArray(sav?.sav_sessions) ? sav.sav_sessions : [];
+      const mapped: SavSessionLite[] = sessions
+        .filter((s: any) => s && typeof s === "object" && s.sav_session_id)
+        .map((s: any) => ({
+          sav_session_id: String(s.sav_session_id),
+          title: s.title ?? null,
+          created_at: typeof s.created_at === "number" ? s.created_at : null,
+          updated_at: typeof s.updated_at === "number" ? s.updated_at : null,
+          status: s.status ?? null,
+        }));
+
+      setAttachSavSessions(mapped);
+
+      // Préselect: active_sav_session_id si dispo sinon première
+      const activeId = (sav?.active_sav_session_id || "").toString().trim();
+      const fallbackId = mapped[0]?.sav_session_id || "";
+      const nextId = activeId && mapped.some(x => x.sav_session_id === activeId) ? activeId : fallbackId;
+
+      setAttachSelectedSavSessionId(nextId);
+    } catch (e) {
+      console.error("loadSavSessionsForChantier error", e);
+      setAttachSavSessions([]);
+      setAttachSelectedSavSessionId("");
+    }
+  };
+
   const doAttach = async () => {
     if (!attachTarget) return;
 
@@ -725,13 +838,26 @@ export default function SavSessionsListPage() {
     setAttachLoading(true);
     setAttachError(null);
 
+    const isNewChantier =
+      !(attachSelectedChantierId || "").trim() && !!(attachNewChantierId || "").trim();
+
+    // Sur un chantier nouvellement créé : toujours SAV-001 (évite SAV-002 vide+photos)
+    const savSessionIdToUse = isNewChantier
+      ? DEFAULT_SAV_SESSION_ID
+      : (attachCreateNewSav
+          ? "__new__"
+          : ((attachSelectedSavSessionId || DEFAULT_SAV_SESSION_ID).trim() || DEFAULT_SAV_SESSION_ID));
+
     try {
       const res = await fetch(
         buildUrl(`/sessions/${encodeURIComponent(attachSessionId)}/attach`),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chantier_id: chantierId, actor: currentUser }),
+          body: JSON.stringify({
+          chantier_id: chantierId,
+          sav_session_id: savSessionIdToUse,
+          }),
           cache: "no-store",
         }
       );
@@ -754,6 +880,62 @@ export default function SavSessionsListPage() {
       setAttachError("Erreur réseau lors du rattachement.");
     } finally {
       setAttachLoading(false);
+    }
+  };
+
+  const openCreateChantierModal = () => {
+    setCreateChantierOpen(true);
+    setCreateChantierId("");
+    setCreateChantierError(null);
+  };
+
+  const closeCreateChantierModal = () => {
+    if (createChantierLoading) return;
+    setCreateChantierOpen(false);
+    setCreateChantierId("");
+    setCreateChantierError(null);
+  };
+
+  const doCreateChantier = async () => {
+    const chantierId = (createChantierId || "").trim();
+    if (!chantierId) {
+      setCreateChantierError("Veuillez saisir une référence chantier.");
+      return;
+    }
+
+    setCreateChantierLoading(true);
+    setCreateChantierError(null);
+
+    try {
+      const res = await fetch(
+        buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            actor: currentUser,
+          }),
+          cache: "no-store",
+        }
+      );
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        setCreateChantierError(
+          txt && txt.length < 220
+            ? `Erreur création: ${txt}`
+            : "Erreur lors de la création du chantier."
+        );
+        return;
+      }
+
+      closeCreateChantierModal();
+      await fetchOverview();
+    } catch (e) {
+      console.error("create chantier error", e);
+      setCreateChantierError("Erreur réseau lors de la création du chantier.");
+    } finally {
+      setCreateChantierLoading(false);
     }
   };
 
@@ -924,37 +1106,13 @@ export default function SavSessionsListPage() {
                   </td>
 
                   <td className="py-2 px-2 align-top">
-                    {c.type === "chantier" && (c.chantier_id || "").trim() ? (
-                      <select
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs border border-transparent ${statusPillClass(
-                          normalizeStatusForFilter(c.status)
-                        )} ${statusUpdatingKey === c.group_key ? "opacity-60 cursor-wait" : "cursor-pointer"}`}
-                        value={normalizeStatusForFilter(c.status) || "A_TRAITER"}
-                        onChange={(e) =>
-                          updateChantierStatus(
-                            String(c.chantier_id || ""),
-                            e.target.value,
-                            c.group_key
-                          )
-                        }
-                        disabled={statusUpdatingKey === c.group_key}
-                        title="Modifier le statut du chantier"
-                      >
-                        {STATUS_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${statusPillClass(
-                          c.status
-                        )}`}
-                      >
-                        {statusLabel(c.status)}
-                      </span>
-                    )}
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${statusPillClass(
+                        c.status
+                      )}`}
+                    >
+                      {statusLabel(c.status)}
+                    </span>
                   </td>
 
                   {showOwnerColumn ? (
@@ -996,7 +1154,9 @@ export default function SavSessionsListPage() {
 
                   <td className="py-2 px-2 align-top">
                     <div className="flex flex-col gap-1">
-                      <div className="font-medium">{isRattachee ? c.chantier_id : "—"}</div>
+                      <div className="font-medium">
+                        {isRattachee ? (c.chantier_label || c.chantier_id) : "—"}
+                      </div>
 
                       {nonRattachee && (
                         <div className="inline-flex items-center gap-1 text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-full px-2 py-0.5 w-fit">
@@ -1093,6 +1253,12 @@ export default function SavSessionsListPage() {
           </select>
 
           {isRefreshing && <span className="text-xs text-neutral-400">⟳</span>}
+          <button
+            onClick={openCreateChantierModal}
+            className="text-sm px-3 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50"
+          >
+            + Nouveau chantier
+          </button>
           <button
             onClick={fetchOverview}
             className="text-sm px-3 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50"
@@ -1278,6 +1444,54 @@ export default function SavSessionsListPage() {
       </section>
 
       {/* MODAL RATTACHEMENT */}
+      {createChantierOpen && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl border border-neutral-200 overflow-hidden">
+            <div className="px-4 py-3 border-b border-neutral-200">
+              <div className="text-base font-semibold">Créer un nouveau chantier</div>
+              <div className="text-sm text-neutral-500">
+                Un chantier vide sera créé avec une session SAV initiale SAV-001.
+              </div>
+            </div>
+
+            <div className="p-4 flex flex-col gap-3">
+              <label className="flex flex-col gap-1">
+                <span className="text-sm font-medium">Référence chantier</span>
+                <input
+                  className="rounded-lg border border-neutral-300 px-3 py-2 text-sm bg-white"
+                  placeholder="Ex: SAV-2026-00045"
+                  value={createChantierId}
+                  onChange={(e) => setCreateChantierId(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") doCreateChantier();
+                  }}
+                />
+              </label>
+
+              {createChantierError && (
+                <div className="text-sm text-red-600">{createChantierError}</div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-neutral-200 flex items-center justify-end gap-2">
+              <button
+                onClick={closeCreateChantierModal}
+                className="text-sm px-3 py-2 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50"
+                disabled={createChantierLoading}
+              >
+                Annuler
+              </button>
+              <button
+                onClick={doCreateChantier}
+                disabled={createChantierLoading}
+                className="text-sm px-3 py-2 rounded-lg border border-neutral-300 bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50"
+              >
+                Créer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {attachOpen && attachTarget && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4 z-50">
           <div className="w-full max-w-xl bg-white rounded-2xl shadow-lg border border-neutral-200">
@@ -1351,8 +1565,10 @@ export default function SavSessionsListPage() {
                         <button
                           key={r.group_key}
                           onClick={() => {
-                            setAttachSelectedChantierId(String(r.chantier_id || ""));
+                            const cid = String(r.chantier_id || "");
+                            setAttachSelectedChantierId(cid);
                             setAttachNewChantierId("");
+                            loadSavSessionsForChantier(cid);
                           }}
                           className={`w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 ${
                             attachSelectedChantierId === String(r.chantier_id || "")
@@ -1384,6 +1600,61 @@ export default function SavSessionsListPage() {
                   }}
                 />
               </div>
+            </div>
+
+            <div className="px-4 pb-2 flex flex-col gap-2">
+              <div className="text-sm font-medium">Session SAV cible</div>
+
+              <label className="flex items-center gap-2 text-sm text-neutral-700">
+                <input
+                  type="radio"
+                  name="savTarget"
+                  className="h-4 w-4"
+                  checked={attachCreateNewSav}
+                  onChange={() => setAttachCreateNewSav(true)}
+                />
+                Créer une nouvelle session SAV
+              </label>
+
+              <label className="flex items-center gap-2 text-sm text-neutral-700">
+                <input
+                  type="radio"
+                  name="savTarget"
+                  className="h-4 w-4"
+                  checked={!attachCreateNewSav}
+                  onChange={() => setAttachCreateNewSav(false)}
+                  disabled={!attachSelectedChantierId}
+                />
+                Rattacher à une session existante
+                {!attachSelectedChantierId ? (
+                  <span className="text-xs text-neutral-400">(sélectionne un chantier)</span>
+                ) : null}
+              </label>
+
+              {!attachCreateNewSav && attachSelectedChantierId && (
+                <select
+                  className="mt-1 rounded-lg border border-neutral-300 px-2 py-2 text-sm bg-white"
+                  value={attachSelectedSavSessionId}
+                  onChange={(e) => setAttachSelectedSavSessionId(e.target.value)}
+                  disabled={attachSavSessions.length === 0}
+                >
+                  {attachSavSessions.length === 0 ? (
+                    <option value="">Aucune session SAV trouvée</option>
+                  ) : (
+                    attachSavSessions.map((s) => {
+                      const label = s.title || s.sav_session_id;
+                      const dt = s.updated_at || s.created_at;
+                      const dtLabel = dt ? ` · ${formatTs(dt)}` : "";
+                      const st = s.status ? ` · ${statusLabel(s.status)}` : "";
+                      return (
+                        <option key={s.sav_session_id} value={s.sav_session_id}>
+                          {label}{dtLabel}{st}
+                        </option>
+                      );
+                    })
+                  )}
+                </select>
+              )}
             </div>
 
             <div className="p-4 border-t border-neutral-200 flex items-center justify-end gap-2">

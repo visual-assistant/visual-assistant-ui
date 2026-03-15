@@ -11,7 +11,7 @@ const buildUrl = (pathOrUrl: string) => {
   return new URL(pathOrUrl, API_BASE).toString();
 };
 
-type PublicChantier = {
+type PublicSavSessionReport = {
   meta: {
     chantier_id: string | null;
     title: string | null;
@@ -21,6 +21,7 @@ type PublicChantier = {
     published_by: string | null;
   };
   contexte_initial?: string | null;
+  symptom?: string | null;
   note_sav_generale?: { text?: string | null; updated_at?: number | null } | null;
   notes_sav: Array<{
     id: string;
@@ -33,6 +34,14 @@ type PublicChantier = {
       kind?: string;
       filename?: string;
       asset_url?: string;
+      created_at?: number;
+    }>;
+    files?: Array<{
+      file_id?: string;
+      filename?: string;
+      url?: string;
+      mime?: string;
+      size?: number;
       created_at?: number;
     }>;
   }>;
@@ -69,13 +78,32 @@ function formatDate(ts?: number | null) {
 
 function pickTechVisualAsset(note: any) {
   const assets = Array.isArray(note?.assets) ? note.assets : [];
-  const tech = assets.find((a: any) => (a?.kind || "").toLowerCase() === "tech_visual");
-  return tech || null;
+  if (!assets.length) return null;
+
+  const tech = assets.find((a: any) => {
+    const kind = String(a?.kind || "").toLowerCase().trim();
+    return kind === "tech_visual" || kind === "tech-visual";
+  });
+
+  if (tech) return tech;
+
+  // fallback : si un seul asset existe ou si kind est absent,
+  // on prend le premier qui a une URL exploitable
+  const firstWithUrl = assets.find((a: any) => a?.asset_url || a?.url);
+  return firstWithUrl || assets[0] || null;
 }
 
 function safeText(v: any) {
   if (v === null || v === undefined) return "";
   return String(v);
+}
+
+function fileLabel(file: any) {
+  const name = safeText(file?.filename || file?.name).trim();
+  if (name) return name;
+  const mime = safeText(file?.mime || file?.mime_type || file?.content_type).trim();
+  if (mime) return mime;
+  return "Fichier";
 }
 
 /**
@@ -153,7 +181,7 @@ export default function PublicChantierReportPage() {
   const params = useParams();
   const slug = (params?.slug ?? "") as string;
 
-  const [data, setData] = useState<PublicChantier | null>(null);
+  const [data, setData] = useState<PublicSavSessionReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [errMsg, setErrMsg] = useState<string | null>(null);
 
@@ -177,13 +205,13 @@ export default function PublicChantierReportPage() {
       setLoading(true);
       setErrMsg(null);
       try {
-        const url = buildUrl(`/chantiers/public/${encodeURIComponent(slug)}`);
+        const url = buildUrl(`/sav/public/${encodeURIComponent(slug)}`);
         const res = await fetch(url, { cache: "no-store" });
         if (!res.ok) {
           const txt = await res.text().catch(() => "");
           throw new Error(txt || `Erreur ${res.status}`);
         }
-        const json = (await res.json()) as PublicChantier;
+        const json = (await res.json()) as PublicSavSessionReport;
         if (!cancelled) setData(json);
       } catch (e: any) {
         if (!cancelled) {
@@ -239,6 +267,7 @@ export default function PublicChantierReportPage() {
   const photos = Array.isArray(data.photos) ? data.photos : [];
 
   const generalText = data.note_sav_generale?.text ? safeText(data.note_sav_generale.text).trim() : "";
+  const symptomText = data.symptom ? safeText(data.symptom).trim() : "";
   const contexteInitial = data.contexte_initial ? safeText(data.contexte_initial).trim() : "";
 
   return (
@@ -261,6 +290,9 @@ export default function PublicChantierReportPage() {
           <main className="space-y-3 sm:space-y-4">
             {/* Synthèse (optionnelle) */}
             {generalText && <ExpandableBlock label="Synthèse" text={generalText} tone="white" />}
+
+            {/* Symptôme (optionnel) */}
+            {symptomText && <ExpandableBlock label="Symptôme" text={symptomText} tone="white" />}
 
             {/* Contexte initial (optionnel) */}
             {contexteInitial && <ExpandableBlock label="Contexte initial" text={contexteInitial} tone="slate" />}
@@ -323,9 +355,14 @@ export default function PublicChantierReportPage() {
             <div className="space-y-3 sm:space-y-4">
               {notes.map((n, idx) => {
                 const tech = pickTechVisualAsset(n);
-                const techUrl = tech?.asset_url ? buildUrl(tech.asset_url) : "";
+                const techUrl = tech?.asset_url
+                  ? buildUrl(tech.asset_url)
+                  : tech?.url
+                    ? buildUrl(tech.url)
+                    : "";
                 const noteText = n?.text ? safeText(n.text).trim() : "";
                 const photoIds = Array.isArray(n?.photo_ids) ? n.photo_ids : [];
+                const files = Array.isArray(n?.files) ? n.files : [];
 
                 const linkedPhotos = photoIds
                   .map((pid) => data.photos_by_id?.[pid])
@@ -420,6 +457,42 @@ export default function PublicChantierReportPage() {
                                     className="w-full h-full object-cover"
                                     loading="lazy"
                                   />
+                                </a>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {files.length > 0 && (
+                        <div>
+                          <div className="text-xs text-slate-500">Fichiers liés</div>
+                          <div className="mt-2 flex flex-col gap-2">
+                            {files.map((f: any, fileIdx: number) => {
+                              const rawUrl = f?.url || f?.file_url;
+                              const url = rawUrl ? buildUrl(rawUrl) : "";
+                              if (!url) return null;
+
+                              return (
+                                <a
+                                  key={f.file_id || `${n.id || idx}_file_${fileIdx}`}
+                                  href={url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 hover:bg-slate-100"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="truncate text-sm font-semibold text-slate-900">
+                                      {fileLabel(f)}
+                                    </div>
+                                    {f?.mime ? (
+                                      <div className="mt-0.5 text-xs text-slate-500">{f.mime}</div>
+                                    ) : null}
+                                  </div>
+
+                                  <div className="shrink-0 text-xs font-bold text-slate-700 underline underline-offset-2">
+                                    Ouvrir
+                                  </div>
                                 </a>
                               );
                             })}
