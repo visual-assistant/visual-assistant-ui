@@ -3208,7 +3208,14 @@ export default function ChantierDetailPage() {
                   <div>
                     <div className="flex items-center justify-between gap-3">
                       <h3 className="text-sm font-semibold text-neutral-900">Note en cours</h3>
-                      <div className="text-xs text-neutral-400"> </div>
+
+                      <Button
+                        variant="outline"
+                        className="h-9 px-3 py-1 text-xs"
+                        onClick={createNewDraftNote}
+                      >
+                        + Nouvelle note
+                      </Button>
                     </div>
 
                     {/* Upload inputs invisibles */}
@@ -3319,7 +3326,8 @@ export default function ChantierDetailPage() {
                     {/* Textarea */}
                     <div className="mt-4">
                       <textarea
-                        className="min-h-[92px] w-full rounded-xl bg-white px-3 py-2 text-sm text-neutral-900 ring-1 ring-neutral-200 placeholder:text-neutral-400"
+                        rows={4}
+                        className="min-h-[92px] w-full resize-none overflow-hidden rounded-xl bg-amber-50 px-3 py-2 text-sm text-neutral-900 ring-1 ring-amber-200 placeholder:text-neutral-400"
                         placeholder="Écrire la note…"
                         value={noteText}
                         onChange={(e) => {
@@ -3332,6 +3340,11 @@ export default function ChantierDetailPage() {
                             setAiSuggestion(null);
                             setAiSourceText("");
                           }
+                        }}
+                        onInput={(e) => {
+                          const el = e.currentTarget;
+                          el.style.height = "auto";
+                          el.style.height = `${el.scrollHeight}px`;
                         }}
                       />
                     </div>
@@ -3808,14 +3821,6 @@ export default function ChantierDetailPage() {
                           Timeline — plus lisible quand il y a beaucoup de notes.
                         </div>
                       </div>
-
-                      <Button
-                        variant="outline"
-                        className="h-9 px-3 py-1 text-xs"
-                        onClick={createNewDraftNote}
-                      >
-                        + Nouvelle note
-                      </Button>
                     </div>
 
                     <div className="mt-4 space-y-3">
