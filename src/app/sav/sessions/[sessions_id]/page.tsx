@@ -376,6 +376,7 @@ function SessionsListItem({
   displayName,
   onRename,
   onCommitName,
+  onDelete,
 }: {
   session: UiSavSession;
   isSelected: boolean;
@@ -386,6 +387,7 @@ function SessionsListItem({
   displayName: string;
   onRename: (name: string) => void;
   onCommitName: () => void;
+  onDelete: () => void;
 }) {
   return (
     <div
@@ -445,18 +447,33 @@ function SessionsListItem({
 
               {/* bouton renommer visible seulement quand la session est sélectionnée */}
               {isSelected ? (
-                <button
-                  type="button"
-                  className="shrink-0 rounded-md bg-white/70 px-2 py-1 text-xs text-neutral-700 ring-1 ring-neutral-200 hover:bg-white"
-                  title="Renommer"
-                  onMouseDown={(e) => e.stopPropagation()} // ✅ empêche le click outside global
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onStartEdit();
-                  }}
-                >
-                  ✎
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md bg-white/70 px-2 py-1 text-xs text-neutral-700 ring-1 ring-neutral-200 hover:bg-white"
+                    title="Renommer"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onStartEdit();
+                    }}
+                  >
+                    ✎
+                  </button>
+
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md bg-red-50 px-2 py-1 text-xs text-red-700 ring-1 ring-red-200 hover:bg-red-100"
+                    title="Supprimer"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete();
+                    }}
+                  >
+                    🗑
+                  </button>
+                </>
               ) : null}
             </div>
           )}
@@ -897,6 +914,11 @@ export default function ChantierDetailPage() {
   const [statusSaving, setStatusSaving] = useState(false);
   const [statusSaveError, setStatusSaveError] = useState<string | null>(null);
   const [previewInstallateurLoading, setPreviewInstallateurLoading] = useState(false);
+  const [movePhotoBusy, setMovePhotoBusy] = useState(false);
+  const [movePhotoError, setMovePhotoError] = useState<string | null>(null);
+  const [movePhotoTarget, setMovePhotoTarget] = useState<string>("");
+  const [clsAiLoadingField, setClsAiLoadingField] = useState<"synthese" | "symptom" | null>(null);
+  const [clsAiError, setClsAiError] = useState<string | null>(null);
 
   useEffect(() => {
     const onDown = () => setEditingSessionId(null);
@@ -931,6 +953,10 @@ export default function ChantierDetailPage() {
     setNoteSaveError(null);
     setNotePublishState("idle");
     setNotePublishError(null);
+
+    setMovePhotoBusy(false);
+    setMovePhotoError(null);
+    setMovePhotoTarget("");
 
     setAiState("idle");
     setAiError(null);
@@ -1248,6 +1274,9 @@ export default function ChantierDetailPage() {
   const [notePublishState, setNotePublishState] = useState<NotePublishState>("idle");
   const [notePublishError, setNotePublishError] = useState<string | null>(null);
 
+  const [noteDeleteBusy, setNoteDeleteBusy] = useState(false);
+  const [noteDeleteError, setNoteDeleteError] = useState<string | null>(null);
+
   type AiState = "idle" | "loading" | "success" | "error";
 
   const [aiState, setAiState] = useState<AiState>("idle");
@@ -1271,6 +1300,7 @@ export default function ChantierDetailPage() {
     setAiError(null);
     setAiSuggestion(null);
     setAiSourceText("");
+    setNoteDeleteError(null);
 
     // Draft local
     if (activeNoteId === "__draft__" || !activeNoteRaw) {
@@ -1358,6 +1388,34 @@ export default function ChantierDetailPage() {
     [API_BASE, key, currentSavSessionId],
   );
 
+  const deleteNote = useCallback(
+    async (noteId: string) => {
+      if (!key) throw new Error("chantier_id manquant");
+      if (!currentSavSessionId) throw new Error("sav_session_id manquant");
+      if (!noteId || noteId === "__draft__") {
+        throw new Error("note_id invalide pour suppression");
+      }
+
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key,
+      )}/sav-sessions/${encodeURIComponent(currentSavSessionId)}/notes/${encodeURIComponent(noteId)}`;
+
+      const res = await fetch(url, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: currentUser }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Erreur API DELETE note: HTTP ${res.status} — ${txt.slice(0, 220)}`);
+      }
+
+      return res.json().catch(() => ({}));
+    },
+    [API_BASE, key, currentSavSessionId, currentUser],
+  );
+
   const improveNoteWithAi = useCallback(
     async (noteId: string) => {
       if (!key) throw new Error("chantier_id manquant");
@@ -1379,6 +1437,31 @@ export default function ChantierDetailPage() {
       }
 
       return (await res.json()) as AiImproveResponse;
+    },
+    [API_BASE, key, currentSavSessionId],
+  );
+
+  const generateClassificationTextWithAi = useCallback(
+    async (field: "synthese" | "symptom") => {
+      if (!key) throw new Error("chantier_id manquant");
+      if (!currentSavSessionId) throw new Error("sav_session_id manquant");
+
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(
+        key as string,
+      )}/sav-sessions/${encodeURIComponent(currentSavSessionId)}/ai-generate-classification-text`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ field }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Erreur API classification AI: HTTP ${res.status} — ${txt.slice(0, 220)}`);
+      }
+
+      return await res.json();
     },
     [API_BASE, key, currentSavSessionId],
   );
@@ -1521,6 +1604,41 @@ export default function ChantierDetailPage() {
       setNoteSaveError(e?.message || "Erreur création note");
     }
   }, [createNote, currentUser, fetchSavItem]);
+
+  const handleDeleteNote = useCallback(
+    async (noteId?: string) => {
+      const targetNoteId = (noteId || activeNoteId || "").trim();
+
+      if (!targetNoteId || targetNoteId === "__draft__") {
+        return;
+      }
+
+      const confirmed = window.confirm(
+        "Supprimer cette note ? Cette action est définitive.",
+      );
+      if (!confirmed) return;
+
+      try {
+        setNoteDeleteBusy(true);
+        setNoteDeleteError(null);
+        setNoteSaveError(null);
+        setNotePublishError(null);
+
+        await deleteNote(targetNoteId);
+
+        // on vide la sélection pour éviter de rester pointé vers une note supprimée
+        setActiveNoteId("");
+        setNoteDirty(false);
+
+        await fetchSavItem();
+      } catch (e: any) {
+        setNoteDeleteError(e?.message || "Erreur suppression note");
+      } finally {
+        setNoteDeleteBusy(false);
+      }
+    },
+    [activeNoteId, deleteNote, fetchSavItem],
+  );
 
   const handleImproveWithAi = useCallback(async () => {
     try {
@@ -1801,6 +1919,36 @@ export default function ChantierDetailPage() {
     return selectedPhotos.find((x) => x.uid === activePhotoUid) || null;
   }, [activePhotoUid, selectedPhotos]);
 
+  const movePhotoOptions = useMemo(() => {
+    const otherSessions = uiSessions
+      .filter((s) => s.id && s.id !== currentSavSessionId)
+      .map((s) => ({
+        value: s.id,
+        label: s.code || s.id,
+      }));
+
+    return [
+      ...otherSessions,
+      { value: "__new__", label: "Nouvelle session SAV" },
+    ];
+  }, [uiSessions, currentSavSessionId]);
+
+  useEffect(() => {
+    if (!movePhotoOptions.length) {
+      if (movePhotoTarget) setMovePhotoTarget("");
+      return;
+    }
+
+    if (
+      movePhotoTarget &&
+      movePhotoOptions.some((opt) => opt.value === movePhotoTarget)
+    ) {
+      return;
+    }
+
+    setMovePhotoTarget(movePhotoOptions[0].value);
+  }, [movePhotoOptions, movePhotoTarget]);
+
   const fullscreenUrl = activePhoto?.url || "";
 
   // ---------------------------
@@ -1903,6 +2051,83 @@ export default function ChantierDetailPage() {
     [API_BASE, key],
   );
 
+  const moveSavPhoto = useCallback(
+    async (payload: {
+      from_sav_session_id: string;
+      to_sav_session_id: string;
+      photo_uid: string;
+      actor?: string;
+    }) => {
+      if (!key) throw new Error("Impossible de déplacer une photo: key manquant.");
+
+      const url = `${API_BASE}/chantiers/${encodeURIComponent(key)}/sav-sessions/move-photo`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(
+          `Erreur API move-photo: HTTP ${res.status} — ${txt.slice(0, 220)}`,
+        );
+      }
+
+      return res.json().catch(() => ({}));
+    },
+    [API_BASE, key],
+  );
+
+  const handleMoveActivePhoto = useCallback(async () => {
+    if (!activePhotoUid) return;
+    if (!currentSavSessionId) return;
+    if (!movePhotoTarget) return;
+    if (movePhotoBusy) return;
+
+    const targetLabel =
+      movePhotoTarget === "__new__" ? "une nouvelle session SAV" : movePhotoTarget;
+
+    const confirmed = window.confirm(
+      `Déplacer cette photo vers ${targetLabel} ?`,
+    );
+    if (!confirmed) return;
+
+    try {
+      setMovePhotoBusy(true);
+      setMovePhotoError(null);
+
+      const json = await moveSavPhoto({
+        from_sav_session_id: currentSavSessionId,
+        to_sav_session_id: movePhotoTarget,
+        photo_uid: activePhotoUid,
+        actor: currentUser,
+      });
+
+      const finalTarget =
+        safeStr(get(json, "to_sav_session_id", ""), "") || movePhotoTarget;
+
+      await fetchSavItem();
+
+      if (finalTarget) {
+        setSelectedId(finalTarget);
+      }
+    } catch (e: any) {
+      setMovePhotoError(e?.message || "Erreur déplacement photo");
+    } finally {
+      setMovePhotoBusy(false);
+    }
+  }, [
+    activePhotoUid,
+    currentSavSessionId,
+    movePhotoTarget,
+    movePhotoBusy,
+    moveSavPhoto,
+    currentUser,
+    fetchSavItem,
+  ]);
+
   const handleCreateSavSession = useCallback(async () => {
     if (!key || creatingSavSession) return;
 
@@ -1929,6 +2154,50 @@ export default function ChantierDetailPage() {
       setCreatingSavSession(false);
     }
   }, [key, creatingSavSession, createSavSession, currentUser, fetchSavItem]);
+
+  const handleDeleteSavSession = useCallback(
+    async (savSessionId: string) => {
+      if (!key || !savSessionId) return;
+
+      const confirmed = window.confirm(
+        "⚠️ ATTENTION\n\nTu es sur le point de supprimer définitivement cette session SAV.\n\nCette action est irréversible.\n\nContinuer ?",
+      );
+      if (!confirmed) return;
+
+      try {
+        const url = `${API_BASE}/chantiers/${encodeURIComponent(
+          key,
+        )}/sav-sessions/${encodeURIComponent(savSessionId)}`;
+
+        const res = await fetch(url, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ actor: currentUser }),
+        });
+
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          throw new Error(
+            `Erreur API DELETE sav-session: HTTP ${res.status} — ${txt.slice(0, 220)}`,
+          );
+        }
+
+        const json = await res.json().catch(() => ({}));
+        const nextActive = safeStr(get(json, "active_sav_session_id", ""), "");
+
+        await fetchSavItem();
+
+        if (nextActive) {
+          setSelectedId(nextActive);
+        } else {
+          setSelectedId(null);
+        }
+      } catch (e: any) {
+        alert(e?.message || "Erreur suppression session SAV");
+      }
+    },
+    [API_BASE, key, currentUser, fetchSavItem],
+  );
 
   const handleChangeSavSessionStatus = useCallback(
     async (nextStatus: string) => {
@@ -2248,6 +2517,55 @@ export default function ChantierDetailPage() {
       setClsTextSaveError(e?.message || "Erreur enregistrement texte");
     }
   }, [selectedRaw, patchSavSession, currentUser, clsSymptom, clsSynthese, fetchSavItem]);
+
+  const handleGenerateClassificationText = useCallback(
+    async (field: "synthese" | "symptom") => {
+      const sid = safeStr(get(selectedRaw, "sav_session_id", ""), "");
+      if (!sid) return;
+
+      try {
+        setClsAiLoadingField(field);
+        setClsAiError(null);
+
+        const json = await generateClassificationTextWithAi(field);
+        const suggested = safeStr(get(json, "result.suggested_text", ""), "");
+
+        if (!suggested) {
+          throw new Error("Aucune suggestion IA renvoyée");
+        }
+
+        if (field === "synthese") {
+          setClsSynthese(suggested);
+          await patchSavSession(sid, {
+            actor: currentUser,
+            classification: {
+              synthese: suggested,
+            },
+          });
+        } else {
+          setClsSymptom(suggested);
+          await patchSavSession(sid, {
+            actor: currentUser,
+            classification: {
+              symptom: suggested,
+            },
+          });
+        }
+
+        setClsTextDirty(false);
+        setClsTextSaveState("saved");
+        setClsTextSaveError(null);
+
+        await fetchSavItem();
+        window.setTimeout(() => setClsTextSaveState("idle"), 1000);
+      } catch (e: any) {
+        setClsAiError(e?.message || "Erreur génération IA");
+      } finally {
+        setClsAiLoadingField(null);
+      }
+    },
+    [selectedRaw, generateClassificationTextWithAi, patchSavSession, currentUser, fetchSavItem],
+  );
 
   const onOwnerChange = useCallback(
     async (newOwner: UserName) => {
@@ -2936,6 +3254,7 @@ export default function ChantierDetailPage() {
                           displayName={displayName}
                           onRename={(val) => setSessionDisplayName(s.id, val)}
                           onCommitName={() => commitSessionDisplayName(s.id)}
+                          onDelete={() => void handleDeleteSavSession(s.id)}
                         />
                       );
                     })}
@@ -3137,14 +3456,27 @@ export default function ChantierDetailPage() {
                       <div className="rounded-2xl bg-neutral-50 p-3 ring-1 ring-neutral-200">
                         <div className="mb-2 flex items-center justify-between gap-3">
                           <div className="text-xs text-neutral-500">Synthèse (optionnel)</div>
-                          <Button
-                            variant="outline"
-                            className="h-8 px-3 py-1 text-xs"
-                            disabled={clsTextSaveState === "saving" || !clsTextDirty}
-                            onClick={() => void saveClassificationTextsNow()}
-                          >
-                            {clsTextSaveState === "saving" ? "Enregistrement…" : "Enregistrer"}
-                          </Button>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white text-sm text-neutral-700 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              title="Générer avec l’IA"
+                              disabled={clsAiLoadingField !== null || clsTextSaveState === "saving"}
+                              onClick={() => void handleGenerateClassificationText("synthese")}
+                            >
+                              {clsAiLoadingField === "synthese" ? "…" : "✨"}
+                            </button>
+
+                            <Button
+                              variant="outline"
+                              className="h-8 px-3 py-1 text-xs"
+                              disabled={clsTextSaveState === "saving" || !clsTextDirty}
+                              onClick={() => void saveClassificationTextsNow()}
+                            >
+                              {clsTextSaveState === "saving" ? "Enregistrement…" : "Enregistrer"}
+                            </Button>
+                          </div>
                         </div>
 
                         <textarea
@@ -3165,14 +3497,27 @@ export default function ChantierDetailPage() {
                       <div className="rounded-2xl bg-neutral-50 p-3 ring-1 ring-neutral-200">
                         <div className="mb-2 flex items-center justify-between gap-3">
                           <div className="text-xs text-neutral-500">Symptôme (optionnel)</div>
-                          <Button
-                            variant="outline"
-                            className="h-8 px-3 py-1 text-xs"
-                            disabled={clsTextSaveState === "saving" || !clsTextDirty}
-                            onClick={() => void saveClassificationTextsNow()}
-                          >
-                            {clsTextSaveState === "saving" ? "Enregistrement…" : "Enregistrer"}
-                          </Button>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white text-sm text-neutral-700 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              title="Générer avec l’IA"
+                              disabled={clsAiLoadingField !== null || clsTextSaveState === "saving"}
+                              onClick={() => void handleGenerateClassificationText("symptom")}
+                            >
+                              {clsAiLoadingField === "symptom" ? "…" : "✨"}
+                            </button>
+
+                            <Button
+                              variant="outline"
+                              className="h-8 px-3 py-1 text-xs"
+                              disabled={clsTextSaveState === "saving" || !clsTextDirty}
+                              onClick={() => void saveClassificationTextsNow()}
+                            >
+                              {clsTextSaveState === "saving" ? "Enregistrement…" : "Enregistrer"}
+                            </Button>
+                          </div>
                         </div>
 
                         <textarea
@@ -3192,7 +3537,9 @@ export default function ChantierDetailPage() {
                     </div>
 
                     <div className="mt-2 text-xs">
-                      {clsTextSaveState === "saved" ? (
+                      {clsAiError ? (
+                        <span className="text-red-600">{clsAiError}</span>
+                      ) : clsTextSaveState === "saved" ? (
                         <span className="text-emerald-700">Texte enregistré</span>
                       ) : clsTextSaveState === "error" ? (
                         <span className="text-red-600">
@@ -3209,14 +3556,31 @@ export default function ChantierDetailPage() {
                     <div className="flex items-center justify-between gap-3">
                       <h3 className="text-sm font-semibold text-neutral-900">Note en cours</h3>
 
-                      <Button
-                        variant="outline"
-                        className="h-9 px-3 py-1 text-xs"
-                        onClick={createNewDraftNote}
-                      >
-                        + Nouvelle note
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        {activeNoteId && activeNoteId !== "__draft__" ? (
+                          <Button
+                            variant="outline"
+                            className="h-9 px-3 py-1 text-xs"
+                            onClick={() => handleDeleteNote(activeNoteId)}
+                            disabled={noteDeleteBusy}
+                          >
+                            {noteDeleteBusy ? "Suppression..." : "Supprimer"}
+                          </Button>
+                        ) : null}
+
+                        <Button
+                          variant="outline"
+                          className="h-9 px-3 py-1 text-xs"
+                          onClick={createNewDraftNote}
+                        >
+                          + Nouvelle note
+                        </Button>
+                      </div>
                     </div>
+
+                    {noteDeleteError ? (
+                      <div className="mt-2 text-xs text-red-600">{noteDeleteError}</div>
+                    ) : null}
 
                     {/* Upload inputs invisibles */}
                     <input
@@ -3585,7 +3949,50 @@ export default function ChantierDetailPage() {
 
                     {/* TAB: Visuels input */}
                     {vfTab === "input" ? (
-                      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
+                      <div className="mt-4">
+                        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl bg-white px-3 py-3 ring-1 ring-neutral-200">
+                          <div className="text-xs font-medium text-neutral-700">
+                            Déplacer la photo active vers
+                          </div>
+
+                          <select
+                            className="h-9 rounded-xl bg-white px-3 text-xs font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:opacity-50"
+                            value={movePhotoTarget}
+                            disabled={!activePhotoUid || movePhotoBusy || !movePhotoOptions.length}
+                            onChange={(e) => setMovePhotoTarget(e.target.value)}
+                          >
+                            {movePhotoOptions.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+
+                          <Button
+                            variant="outline"
+                            className="h-9 px-3 py-1 text-xs"
+                            disabled={!activePhotoUid || movePhotoBusy || !movePhotoTarget}
+                            onClick={() => void handleMoveActivePhoto()}
+                          >
+                            {movePhotoBusy ? "Déplacement..." : "Déplacer"}
+                          </Button>
+
+                          {activePhotoUid ? (
+                            <span className="text-xs text-neutral-500">
+                              Photo active sélectionnée
+                            </span>
+                          ) : (
+                            <span className="text-xs text-neutral-400">
+                              Sélectionner une photo
+                            </span>
+                          )}
+
+                          {movePhotoError ? (
+                            <span className="text-xs text-red-600">{movePhotoError}</span>
+                          ) : null}
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
                         {/* Preview */}
                         <div className="lg:col-span-8">
                           <div className="relative flex h-[360px] items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200">
@@ -3676,6 +4083,7 @@ export default function ChantierDetailPage() {
                           )}
                         </div>
                       </div>
+                    </div>
                     ) : null}
 
                     {/* TAB: Visuels output */}
@@ -3874,6 +4282,15 @@ export default function ChantierDetailPage() {
                                     onClick={() => setActiveNoteId(n.id)}
                                   >
                                     Réouvrir
+                                  </Button>
+
+                                  <Button
+                                    variant="outline"
+                                    className="h-9 px-3 py-1 text-xs"
+                                    onClick={() => handleDeleteNote(n.id)}
+                                    disabled={noteDeleteBusy}
+                                  >
+                                    {noteDeleteBusy && n.id === activeNoteId ? "Suppression..." : "Supprimer"}
                                   </Button>
 
                                   <Button
