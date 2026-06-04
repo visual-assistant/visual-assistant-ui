@@ -62,28 +62,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
 
-      <body className="bg-gray-50 text-gray-900 antialiased">
-        <header className="border-b bg-white">
-          <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
-            <div className="text-xl font-semibold">
-              Visual Assistant
-              <span className="ml-2 text-sm text-gray-500">PERGE</span>
-            </div>
-            <nav className="text-sm text-gray-600">
-              <a href="/" className="hover:text-gray-900">Accueil</a>
-            </nav>
-          </div>
-        </header>
-
-        <main className="mx-auto max-w-6xl px-6 py-8">
-          {children}
-        </main>
-
-        <footer className="mt-16 border-t bg-white">
-          <div className="mx-auto max-w-6xl px-6 py-6 text-sm text-gray-500">
-            © {new Date().getFullYear()} PERGE — Visual Assistant
-          </div>
-        </footer>
+      <body className="bg-slate-50 text-slate-950 antialiased">
+        {children}
       </body>
     </html>
   );

@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import AppShell from "../../../../components/AppShell";
 
 /**
  * Chantier détail — Étape 2.5 (READ-ONLY + Chantier stable fini)
@@ -244,6 +245,48 @@ type UiSavNote = {
   updatedAt: string;
 };
 
+type UiInboundAttachment = {
+  filename: string;
+  url: string;
+  mimeType: string;
+};
+
+type UiInboundPhoto = {
+  photoUid: string;
+  url: string;
+};
+
+type UiInboundMessage = {
+  id: string;
+  channel: "WHATSAPP" | "EMAIL" | string;
+  channelLabel: string;
+  senderDisplay: string;
+  senderRole: string;
+  receivedAt: any;
+  lastMessageAt: any;
+  receivedAtLabel: string;
+  kind: string;
+  kindLabel: string;
+  subject: string;
+  text: string;
+  messageCount: number;
+  photoCount: number;
+  attachmentCount: number;
+  photos: UiInboundPhoto[];
+  attachments: UiInboundAttachment[];
+};
+
+type UiInboundSummary = {
+  channelLabel: string;
+  channel: string;
+  senderDisplay: string;
+  totalMessages: number;
+  totalPhotos: number;
+  totalAttachments: number;
+  firstReceivedLabel: string;
+  lastReceivedLabel: string;
+};
+
 function normalizeNoteTarget(raw: any): string {
   const s = safeStr(raw, "");
   if (!s) return "—";
@@ -288,14 +331,13 @@ function noteStatusTone(code: "DRAFT" | "SENT" | "FAILED"): "neutral" | "success
 
 function pickMostRecentNoteId(notes: UiSavNote[]): string {
   if (!notes.length) return "";
+
   const score = (n: UiSavNote) => {
-    // on privilégie updatedAt, puis createdAt
-    const t =
-      Date.parse(n.updatedAt) ||
-      Date.parse(n.createdAt) ||
-      0;
-    return Number.isFinite(t) ? t : 0;
+    // updatedAt / createdAt peuvent être des timestamps epoch seconds,
+    // parfois convertis en string par safeStr().
+    return toTs(n.updatedAt) || toTs(n.createdAt) || 0;
   };
+
   const sorted = [...notes].sort((a, b) => score(b) - score(a));
   return sorted[0]?.id || "";
 }
@@ -366,6 +408,345 @@ function formatHumanDate(value: any): string {
   return "";
 }
 
+function toTs(value: any): number {
+  if (value === null || value === undefined) return 0;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return 0;
+
+    const asNum = Number(s);
+    if (!Number.isNaN(asNum) && Number.isFinite(asNum)) {
+      return asNum;
+    }
+
+    const parsed = Date.parse(s);
+    if (!Number.isNaN(parsed)) {
+      return parsed / 1000;
+    }
+  }
+
+  return 0;
+}
+
+function normalizeInboundChannelLabel(channel: any): string {
+  const s = safeStr(channel, "").toUpperCase();
+  if (s === "WHATSAPP") return "WhatsApp";
+  if (s === "EMAIL") return "Email";
+  return s || "Canal inconnu";
+}
+
+function normalizeInboundKindLabel(kind: any, channel: any): string {
+  const k = safeStr(kind, "").toLowerCase();
+  const c = safeStr(channel, "").toUpperCase();
+
+  if (k === "caption") return "Légende photo";
+  if (k === "message") return "Message";
+  if (k === "email") return "Email";
+  if (k === "whatsapp_thread") return "Fil WhatsApp";
+  if (k === "email_thread") return "Email";
+  if (c === "WHATSAPP") return "Fil WhatsApp";
+  if (c === "EMAIL") return "Email";
+  return "Message reçu";
+}
+
+function inboundChannelTone(channel: any): string {
+  const s = safeStr(channel, "").toUpperCase();
+  if (s === "WHATSAPP") return "bg-emerald-100 text-emerald-800 ring-emerald-200";
+  if (s === "EMAIL") return "bg-blue-100 text-blue-800 ring-blue-200";
+  return "bg-neutral-100 text-neutral-700 ring-neutral-200";
+}
+
+function inboundChannelIcon(channel: any): string {
+  const s = safeStr(channel, "").toUpperCase();
+  if (s === "WHATSAPP") return "💬";
+  if (s === "EMAIL") return "✉️";
+  return "📥";
+}
+
+function MessagesRecusTab({
+  messages,
+  summary,
+  selectedSessionLabel,
+}: {
+  messages: UiInboundMessage[];
+  summary: UiInboundSummary;
+  selectedSessionLabel: string;
+}) {
+  return (
+    <div className="mx-auto max-w-7xl">
+      <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold text-slate-950">Messages reçus</h2>
+          <p className="mt-2 text-sm text-slate-500">
+            Historique des messages, photos et fichiers reçus avant rattachement au chantier.
+          </p>
+          {selectedSessionLabel ? (
+            <div className="mt-2 text-xs text-slate-400">
+              Session affichée : {selectedSessionLabel}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <div className="flex items-center gap-2">
+              <span>{inboundChannelIcon(summary.channel)}</span>
+              <span className="font-semibold text-slate-900">{summary.channelLabel}</span>
+            </div>
+
+            <div className="text-slate-600">
+              {summary.totalPhotos} photo{summary.totalPhotos > 1 ? "s" : ""}
+            </div>
+
+            <div className="text-slate-600">
+              {summary.totalMessages} message{summary.totalMessages > 1 ? "s" : ""}
+            </div>
+
+            <div className="text-slate-600">
+              Dernier : {summary.lastReceivedLabel || "—"}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <section className="xl:col-span-2">
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h3 className="mb-6 text-lg font-semibold text-slate-950">Fil de réception</h3>
+
+            {messages.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 py-12 text-center">
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-white text-2xl shadow-sm ring-1 ring-slate-200">
+                  📥
+                </div>
+                <h4 className="mt-4 font-semibold text-slate-900">Aucun message reçu</h4>
+                <p className="mx-auto mt-2 max-w-md text-sm text-slate-500">
+                  Les messages WhatsApp, captions, emails ou fichiers rattachés à cette session SAV apparaîtront ici.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {messages.map((msg, index) => (
+                  <div key={msg.id} className="relative">
+                    {index < messages.length - 1 ? (
+                      <div className="absolute bottom-0 left-4 top-11 w-px bg-slate-200" />
+                    ) : null}
+
+                    <div className="flex gap-4">
+                      <div
+                        className={cx(
+                          "relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm ring-1",
+                          msg.channel === "WHATSAPP"
+                            ? "bg-emerald-100 ring-emerald-200"
+                            : msg.channel === "EMAIL"
+                              ? "bg-blue-100 ring-blue-200"
+                              : "bg-slate-100 ring-slate-200",
+                        )}
+                      >
+                        {inboundChannelIcon(msg.channel)}
+                      </div>
+
+                      <article className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <div className="mb-3 flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span
+                                className={cx(
+                                  "inline-flex items-center rounded-md px-2 py-0.5 text-xs font-semibold ring-1",
+                                  inboundChannelTone(msg.channel),
+                                )}
+                              >
+                                {msg.channelLabel}
+                              </span>
+
+                              <span className="text-sm font-semibold text-slate-950">
+                                {msg.senderDisplay || "Expéditeur inconnu"}
+                              </span>
+
+                              {msg.senderRole ? (
+                                <>
+                                  <span className="text-xs text-slate-400">·</span>
+                                  <span className="text-xs text-slate-500">{msg.senderRole}</span>
+                                </>
+                              ) : null}
+                            </div>
+
+                            <div className="mt-1 text-xs text-slate-500">
+                              {msg.receivedAtLabel || "Date inconnue"}
+                            </div>
+                          </div>
+
+                          <span className="shrink-0 text-xs text-slate-500">
+                            {msg.kindLabel}
+                          </span>
+                        </div>
+
+                        {msg.subject ? (
+                          <div className="mb-3">
+                            <div className="text-xs font-semibold text-slate-500">Sujet :</div>
+                            <div className="mt-1 text-sm font-semibold text-slate-950">
+                              {msg.subject}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {msg.text ? (
+                          <div className="mb-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-900">
+                            {msg.text}
+                          </div>
+                        ) : null}
+
+                        <div className="mb-3 flex flex-wrap items-center gap-4 text-xs text-slate-600">
+                          {msg.photoCount > 0 ? (
+                            <span>🖼️ {msg.photoCount} photo{msg.photoCount > 1 ? "s" : ""}</span>
+                          ) : null}
+
+                          {msg.attachmentCount > 0 ? (
+                            <span>
+                              📎 {msg.attachmentCount} pièce{msg.attachmentCount > 1 ? "s" : ""} jointe{msg.attachmentCount > 1 ? "s" : ""}
+                            </span>
+                          ) : null}
+
+                          {msg.photoCount === 0 && msg.attachmentCount === 0 ? (
+                            <span className="text-slate-400">Aucun média</span>
+                          ) : null}
+                        </div>
+
+                        {msg.photos.length > 0 ? (
+                          <div className="mb-3 flex flex-wrap gap-2">
+                            {msg.photos.slice(0, 4).map((photo) =>
+                              photo.url ? (
+                                <div
+                                  key={photo.photoUid}
+                                  className="h-20 w-20 overflow-hidden rounded-xl border border-slate-200 bg-white"
+                                >
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={photo.url}
+                                    alt="Photo reçue"
+                                    className="h-full w-full object-cover"
+                                  />
+                                </div>
+                              ) : (
+                                <div
+                                  key={photo.photoUid}
+                                  className="flex h-20 w-20 items-center justify-center rounded-xl border border-slate-200 bg-slate-100 text-2xl text-slate-400"
+                                >
+                                  🖼️
+                                </div>
+                              ),
+                            )}
+
+                            {msg.photos.length > 4 ? (
+                              <div className="flex h-20 w-20 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-600">
+                                +{msg.photos.length - 4}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+
+                        {msg.attachments.length > 0 ? (
+                          <div className="space-y-2">
+                            {msg.attachments.map((att, i) => {
+                              const label = att.filename || `Pièce jointe ${i + 1}`;
+
+                              return att.url ? (
+                                <a
+                                  key={`${label}-${i}`}
+                                  href={att.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 hover:bg-slate-50"
+                                >
+                                  <span>📎</span>
+                                  <span className="truncate">{label}</span>
+                                </a>
+                              ) : (
+                                <div
+                                  key={`${label}-${i}`}
+                                  className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                                >
+                                  <span>📎</span>
+                                  <span className="truncate">{label}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </article>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <aside className="xl:col-span-1">
+          <div className="sticky top-[164px] rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h3 className="mb-5 text-lg font-semibold text-slate-950">Résumé réception</h3>
+
+            <div className="space-y-5">
+              <div>
+                <div className="mb-1 text-xs font-medium text-slate-500">Canal principal</div>
+                <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <span>{inboundChannelIcon(summary.channel)}</span>
+                  <span>{summary.channelLabel}</span>
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-1 text-xs font-medium text-slate-500">Expéditeur principal</div>
+                <div className="text-sm font-semibold text-slate-900">
+                  {summary.senderDisplay || "—"}
+                </div>
+              </div>
+
+              <div className="border-t border-slate-200 pt-5">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-sm text-slate-600">Messages totaux</span>
+                    <span className="text-sm font-semibold text-slate-900">{summary.totalMessages}</span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-sm text-slate-600">Photos</span>
+                    <span className="text-sm font-semibold text-slate-900">{summary.totalPhotos}</span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-sm text-slate-600">Fichiers</span>
+                    <span className="text-sm font-semibold text-slate-900">{summary.totalAttachments}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-slate-200 pt-5">
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1 text-xs font-medium text-slate-500">Première réception</div>
+                    <div className="text-sm text-slate-900">{summary.firstReceivedLabel || "—"}</div>
+                  </div>
+
+                  <div>
+                    <div className="mb-1 text-xs font-medium text-slate-500">Dernière réception</div>
+                    <div className="text-sm text-slate-900">{summary.lastReceivedLabel || "—"}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
 function SessionsListItem({
   session,
   isSelected,
@@ -405,9 +786,9 @@ function SessionsListItem({
         }
       }}
       className={cx(
-        "w-full rounded-2xl p-4 text-left ring-1 transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-neutral-300",
+        "w-full rounded-2xl p-3 text-left ring-1 transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-orange-200",
         isSelected
-          ? "bg-indigo-50 ring-indigo-200"
+          ? "bg-orange-50 ring-orange-200"
           : "bg-white ring-neutral-200 hover:bg-neutral-50",
       )}
     >
@@ -445,6 +826,12 @@ function SessionsListItem({
                 {displayName?.trim() ? displayName : session.code}
               </span>
 
+              {session.category ? (
+                <span className="shrink-0 rounded-md bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700 ring-1 ring-red-100">
+                  {session.category}
+                </span>
+              ) : null}
+
               {/* bouton renommer visible seulement quand la session est sélectionnée */}
               {isSelected ? (
                 <>
@@ -478,24 +865,9 @@ function SessionsListItem({
             </div>
           )}
 
-          {/* meta (date/cat) */}
-          {!isSelected && (
-            <>
-              {session.dateLabel ? ` · ${session.dateLabel}` : ""}
-              {session.category ? ` · ${session.category}` : ""}
-            </>
-          )}
         </div>
         <Pill tone={statusTone(session.statusLabel)}>{session.statusLabel}</Pill>
       </div>
-
-      {(session.subCategory || session.symptom) && (
-        <div className="mt-1 text-sm text-neutral-700">
-          {session.subCategory}
-          {session.subCategory && session.symptom ? " · " : ""}
-          {session.symptom ? `Symptôme: ${session.symptom}` : ""}
-        </div>
-      )}
     </div>
   );
 }
@@ -540,6 +912,8 @@ type AiImproveResponse = {
 
 
 export default function ChantierDetailPage() {
+  const [mainTab, setMainTab] = useState<"CHANTIER" | "SESSION" | "MESSAGES">("SESSION");
+
   // ✅ route param robuste (sessions_id / chantier_id / key / etc.)
   const params = useParams() as Record<string, string | string[] | undefined>;
   const router = useRouter();
@@ -1048,8 +1422,9 @@ export default function ChantierDetailPage() {
     }
 
     const score = (n: UiSavNote) => {
-      const t = Date.parse(n.updatedAt) || Date.parse(n.createdAt) || 0;
-      return Number.isFinite(t) ? t : 0;
+      // Les dates backend sont souvent des timestamps epoch seconds.
+      // Date.parse() ne les interprète pas correctement quand elles sont en string.
+      return toTs(n.updatedAt) || toTs(n.createdAt) || 0;
     };
 
     const sorted = [...uiNotes].sort((a, b) => score(b) - score(a));
@@ -1090,6 +1465,12 @@ export default function ChantierDetailPage() {
       return;
     }
 
+    // Important :
+    // "__draft__" est un état volontaire de nouvelle note.
+    // Il ne faut pas le remplacer automatiquement par la note la plus récente,
+    // sinon après un enregistrement l'utilisateur revient malgré lui sur la note sauvegardée.
+    if (activeNoteId === "__draft__") return;
+
     if (activeNoteId && uiNotes.some((n) => n.id === activeNoteId)) return;
 
     if (uiNotes.length > 0) {
@@ -1097,7 +1478,7 @@ export default function ChantierDetailPage() {
       return;
     }
 
-    // pas de note => on met un placeholder draft (création API viendra en 4.2)
+    // pas de note => on met un placeholder draft
     setActiveNoteId("__draft__");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionRaw, uiNotes]);
@@ -1511,7 +1892,25 @@ export default function ChantierDetailPage() {
 
       setNoteSaveState("saved");
       setNoteDirty(false);
-      await fetchSavItem(); // refresh pour retrouver includes + garder cohérence
+
+      await fetchSavItem();
+
+      // Après un enregistrement réussi, l'éditeur devient immédiatement
+      // une nouvelle note vierge.
+      //
+      // Important :
+      // - activeNoteId repasse en "__draft__"
+      // - on vide explicitement l'éditeur tout de suite
+      // - lastInitNoteIdRef est reset pour permettre à l'effet d'init de
+      //   réappliquer proprement l'état draft si besoin.
+      lastInitNoteIdRef.current = "";
+      setActiveNoteId("__draft__");
+      setNoteTarget("INTERNE");
+      setNoteChannel("NONE");
+      setNoteText("");
+      setNoteSaveState("idle");
+      setNoteSaveError(null);
+      setNoteDirty(false);
     } catch (e: any) {
       setNoteSaveState("error");
       setNoteSaveError(e?.message || "Erreur enregistrement");
@@ -1849,6 +2248,133 @@ export default function ChantierDetailPage() {
       return { uid, p: p || null, url };
     });
   }, [selectedPhotoUids, photosByUid]);
+
+  const inboundMessages = useMemo<UiInboundMessage[]>(() => {
+    const raw = (get(selectedRaw, "inbound_messages", []) || []) as any[];
+    if (!Array.isArray(raw)) return [];
+
+    const mapped = raw.map((msg: any, idx: number) => {
+      const id =
+        safeStr(get(msg, "id", ""), "") ||
+        safeStr(get(msg, "source_inbox_item_id", ""), "") ||
+        `inbound-${idx}`;
+
+      const channel = safeStr(get(msg, "channel", ""), "").toUpperCase();
+      const linkedPhotoUidsRaw = (get(msg, "linked_photo_uids", []) || []) as any[];
+      const linkedPhotoUids = Array.isArray(linkedPhotoUidsRaw)
+        ? linkedPhotoUidsRaw.map((x) => safeStr(x, "")).filter(Boolean)
+        : [];
+
+      const photos: UiInboundPhoto[] = linkedPhotoUids.map((uid) => {
+        const p = photosByUid.get(uid);
+        const url =
+          safeStr(get(p, "annotated_url", ""), "") ||
+          safeStr(get(p, "original_url", ""), "") ||
+          safeStr(get(p, "url", ""), "");
+        return {
+          photoUid: uid,
+          url,
+        };
+      });
+
+      const attachmentsRaw = (get(msg, "attachments", []) || []) as any[];
+      const attachments: UiInboundAttachment[] = Array.isArray(attachmentsRaw)
+        ? attachmentsRaw
+            .filter((att) => att && typeof att === "object")
+            .map((att) => ({
+              filename: safeStr(get(att, "filename", ""), ""),
+              url: safeStr(get(att, "url", ""), ""),
+              mimeType:
+                safeStr(get(att, "mime_type", ""), "") ||
+                safeStr(get(att, "mime", ""), ""),
+            }))
+        : [];
+
+      const receivedAt = get(msg, "received_at", null);
+      const lastMessageAt = get(msg, "last_message_at", null);
+      const kind = safeStr(get(msg, "kind", ""), "");
+
+      const photoCountFromData = Number(get(msg, "photo_count", 0) || 0);
+      const attachmentCountFromData = Number(get(msg, "attachment_count", 0) || 0);
+      const messageCountFromData = Number(get(msg, "message_count", 0) || 0);
+
+      return {
+        id,
+        channel,
+        channelLabel: normalizeInboundChannelLabel(channel),
+        senderDisplay:
+          safeStr(get(msg, "sender_display", ""), "") ||
+          safeStr(get(msg, "sender_phone", ""), "") ||
+          safeStr(get(msg, "sender_email", ""), ""),
+        senderRole: safeStr(get(msg, "sender_role", ""), ""),
+        receivedAt,
+        lastMessageAt,
+        receivedAtLabel: formatHumanDate(receivedAt),
+        kind,
+        kindLabel: normalizeInboundKindLabel(kind, channel),
+        subject: safeStr(get(msg, "subject", ""), ""),
+        text:
+          safeStr(get(msg, "text", ""), "") ||
+          safeStr(get(msg, "clean_content_text", ""), "") ||
+          safeStr(get(msg, "raw_content_text", ""), ""),
+        messageCount: messageCountFromData > 0 ? messageCountFromData : 1,
+        photoCount: photoCountFromData > 0 ? photoCountFromData : photos.length,
+        attachmentCount:
+          attachmentCountFromData > 0 ? attachmentCountFromData : attachments.length,
+        photos,
+        attachments,
+      };
+    });
+
+    mapped.sort((a, b) => {
+      const ta = toTs(a.receivedAt) || toTs(a.lastMessageAt);
+      const tb = toTs(b.receivedAt) || toTs(b.lastMessageAt);
+      return ta - tb;
+    });
+
+    return mapped;
+  }, [selectedRaw, photosByUid]);
+
+  const inboundSummary = useMemo<UiInboundSummary>(() => {
+    if (!inboundMessages.length) {
+      return {
+        channelLabel: "—",
+        channel: "",
+        senderDisplay: "—",
+        totalMessages: 0,
+        totalPhotos: 0,
+        totalAttachments: 0,
+        firstReceivedLabel: "",
+        lastReceivedLabel: "",
+      };
+    }
+
+    const channelCounts = new Map<string, number>();
+    for (const msg of inboundMessages) {
+      const key = msg.channel || "";
+      channelCounts.set(key, (channelCounts.get(key) || 0) + 1);
+    }
+
+    const mainChannel =
+      Array.from(channelCounts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+
+    const first = inboundMessages[0];
+    const last = inboundMessages[inboundMessages.length - 1];
+
+    return {
+      channel: mainChannel,
+      channelLabel: normalizeInboundChannelLabel(mainChannel),
+      senderDisplay: first?.senderDisplay || "—",
+      totalMessages: inboundMessages.reduce((sum, msg) => sum + Math.max(1, msg.messageCount || 1), 0),
+      totalPhotos: inboundMessages.reduce((sum, msg) => sum + (msg.photoCount || 0), 0),
+      totalAttachments: inboundMessages.reduce((sum, msg) => sum + (msg.attachmentCount || 0), 0),
+      firstReceivedLabel: first?.receivedAtLabel || "",
+      lastReceivedLabel:
+        formatHumanDate(last?.lastMessageAt) ||
+        last?.receivedAtLabel ||
+        "",
+    };
+  }, [inboundMessages]);
 
   const [activePhotoUid, setActivePhotoUid] = useState<string>("");
   const [isPhotoFullscreenOpen, setIsPhotoFullscreenOpen] = useState(false);
@@ -2850,58 +3376,102 @@ export default function ChantierDetailPage() {
   const rightStatusCode = normalizeStatusCode(get(selectedRaw, "status", "A_TRAITER"));
 
   return (
-    <div className="min-h-screen bg-neutral-50">
-      {/* Top bar */}
-      <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-[1400px] items-center justify-between gap-4 px-6 py-4">
-          <div className="flex items-center gap-3">
-            <div className="text-lg font-semibold text-neutral-900">
-              Visual Assistant · SAV
+    <AppShell>
+      <main className="min-h-screen bg-slate-50 text-slate-950">
+        <div className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
+          <div className="flex h-[88px] items-center justify-between gap-4 px-10">
+            <div className="flex min-w-0 items-center gap-4">
+              <button
+                type="button"
+                onClick={() => router.push("/sav/sessions")}
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-2xl text-slate-700 hover:bg-slate-100"
+                title="Retour liste chantiers"
+              >
+                ←
+              </button>
+
+              <div className="min-w-0">
+                <h1 className="truncate text-3xl font-semibold tracking-tight text-slate-950">
+                  Chantier Détail
+                </h1>
+                <div className="mt-1 truncate text-sm text-slate-500">
+                  {(referenceChantierFromData || key || "Chantier") +
+                    " · " +
+                    (owner || "—")}
+                </div>
+              </div>
             </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                className="rounded-full bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100"
+                onClick={() => setDebugOpen((v) => !v)}
+                title="Afficher/masquer debug"
+              >
+                debug
+              </button>
+
+              <select
+                className="h-11 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-900 shadow-sm outline-none hover:bg-slate-50"
+                value={currentUser}
+                onChange={(e) => setCurrentUser(e.target.value as UserName)}
+              >
+                {USERS.map((u) => (
+                  <option key={u} value={u}>
+                    {u}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex h-12 items-end gap-8 px-10">
+            <button
+              type="button"
+              onClick={() => setMainTab("CHANTIER")}
+              className={cx(
+                "h-12 border-b-2 px-1 text-sm font-semibold transition",
+                mainTab === "CHANTIER"
+                  ? "border-orange-600 text-orange-600"
+                  : "border-transparent text-slate-700 hover:text-slate-950",
+              )}
+            >
+              Info Chantier
+            </button>
 
             <button
               type="button"
-              className="hidden rounded-lg bg-neutral-100 px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-200 md:inline"
-              onClick={() => setDebugOpen((v) => !v)}
-              title="Afficher/masquer debug"
+              onClick={() => setMainTab("SESSION")}
+              className={cx(
+                "h-12 border-b-2 px-1 text-sm font-semibold transition",
+                mainTab === "SESSION"
+                  ? "border-orange-600 text-orange-600"
+                  : "border-transparent text-slate-700 hover:text-slate-950",
+              )}
             >
-              debug
+              Session SAV
             </button>
 
-            {referenceChantierFromData || key ? (
-              <span className="hidden rounded-lg bg-neutral-100 px-2 py-1 text-xs text-neutral-600 md:inline">
-                {referenceChantierFromData || key}
-              </span>
-            ) : null}
-          </div>
-
-          <div className="flex items-center gap-3">
-            <Button
-              variant="outline"
-              onClick={() => router.push("/sav/sessions")}
+            <button
+              type="button"
+              onClick={() => setMainTab("MESSAGES")}
+              className={cx(
+                "h-12 border-b-2 px-1 text-sm font-semibold transition",
+                mainTab === "MESSAGES"
+                  ? "border-orange-600 text-orange-600"
+                  : "border-transparent text-slate-700 hover:text-slate-950",
+              )}
             >
-              Retour
-            </Button>
-
-            <select
-              className="h-10 rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50"
-              value={currentUser}
-              onChange={(e) => setCurrentUser(e.target.value as UserName)}
-            >
-              {USERS.map((u) => (
-                <option key={u} value={u}>
-                  {u}
-                </option>
-              ))}
-            </select>
+              Messages reçus
+            </button>
           </div>
         </div>
-      </header>
 
-      <main className="mx-auto max-w-[1400px] px-6 py-6">
+        <div className="px-10 py-7">
         {/* Debug panel */}
         {debugOpen && (
-          <div className="mb-4 rounded-2xl bg-white px-5 py-4 text-sm ring-1 ring-neutral-200">
+          <div className="mb-6 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-sm shadow-sm">
             <div className="font-semibold text-neutral-900">Debug</div>
             <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
               <div>
@@ -2934,7 +3504,7 @@ export default function ChantierDetailPage() {
 
         {/* Loading / error */}
         {(loading || error) && (
-          <div className="mb-4 rounded-2xl bg-white px-5 py-3 text-sm ring-1 ring-neutral-200">
+          <div className="mb-6 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm shadow-sm">
             {loading ? (
               <span className="text-neutral-700">Chargement…</span>
             ) : (
@@ -2942,6 +3512,8 @@ export default function ChantierDetailPage() {
             )}
           </div>
         )}
+
+        
 
         {/* Unattached session state */}
         {kind === "unattached_session" ? (
@@ -2956,10 +3528,28 @@ export default function ChantierDetailPage() {
               chantier.
             </div>
           </section>
+        ) : mainTab === "MESSAGES" ? (
+          <MessagesRecusTab
+            messages={inboundMessages}
+            summary={inboundSummary}
+            selectedSessionLabel={
+              selected
+                ? `${selected.code}${selected.dateLabel ? ` · ${selected.dateLabel}` : ""}`
+                : ""
+            }
+          />
         ) : (
-          <div className="grid grid-cols-12 gap-6">
+          <div className="grid grid-cols-12 gap-7">
             {/* Left column */}
-            <div className="col-span-12 space-y-6 lg:col-span-4">
+            <div
+              className={cx(
+                "col-span-12 space-y-6",
+                mainTab === "CHANTIER"
+                  ? "lg:col-span-8 lg:col-start-3"
+                  : "lg:sticky lg:top-[164px] lg:col-span-3 lg:max-h-[calc(100vh-188px)] lg:overflow-auto lg:pr-1",
+              )}
+            >
+            {mainTab === "CHANTIER" ? (
               <Card
                 title="Chantier (stable)"
                 right={
@@ -3216,7 +3806,10 @@ export default function ChantierDetailPage() {
                   </div>
                 </div>
               </Card>
+              ) : null}
 
+              {mainTab === "SESSION" ? (
+              <>
               <Card
                 title="Sessions SAV"
                 right={
@@ -3265,13 +3858,296 @@ export default function ChantierDetailPage() {
                   </div>
                 )}
               </Card>
+
+              <Card
+                title="Contexte session"
+                className="ring-orange-200"
+                right={
+                  <div className="flex items-center gap-2">
+                    {selected ? (
+                      <span className="rounded-lg bg-orange-50 px-2 py-1 text-xs font-semibold text-orange-700 ring-1 ring-orange-100">
+                        {selected.id}
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="rounded-xl bg-white px-2 py-1 text-xs text-neutral-700 ring-1 ring-neutral-200 hover:bg-neutral-50"
+                      title="Modifier le contexte de la session"
+                    >
+                      ✎
+                    </button>
+                  </div>
+                }
+              >
+                {selected ? (
+                  <div className="space-y-5">
+                    <div>
+                      <div className="text-xs text-neutral-500">
+                        {selected.dateLabel || "Session active"}
+                      </div>
+
+                      <select
+                        className={cx(
+                          "mt-2 h-9 w-full rounded-xl px-3 text-xs font-medium border border-transparent",
+                          rightStatusCode === "RESOLU"
+                            ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                            : rightStatusCode === "EN_ATTENTE_INTERNE"
+                              ? "bg-amber-50 text-amber-700 ring-1 ring-amber-200"
+                              : rightStatusCode === "EN_ATTENTE_INSTALLATEUR"
+                                ? "bg-sky-50 text-sky-700 ring-1 ring-sky-200"
+                                : "bg-neutral-100 text-neutral-700 ring-1 ring-neutral-200",
+                          statusSaving ? "opacity-60 cursor-wait" : "cursor-pointer",
+                        )}
+                        value={rightStatusCode}
+                        onChange={(e) => void handleChangeSavSessionStatus(e.target.value)}
+                        disabled={statusSaving || !currentSavSessionId}
+                        title="Modifier le statut de la session SAV"
+                      >
+                        {SAV_STATUS_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => void handlePreviewInstallateur()}
+                        disabled={!currentSavSessionId || previewInstallateurLoading}
+                        className="mt-3 h-10 w-full rounded-xl bg-orange-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {previewInstallateurLoading ? "Ouverture..." : "Aperçu installateur"}
+                      </button>
+                    </div>
+
+                    {statusSaveError ? (
+                      <div className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700 ring-1 ring-red-200">
+                        {statusSaveError}
+                      </div>
+                    ) : null}
+
+                    <div className="border-t border-neutral-100 pt-4">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                          Qualification
+                        </div>
+
+                        <div className="text-xs">
+                          {clsSaveState === "saving" ? (
+                            <span className="text-neutral-500">Enregistrement…</span>
+                          ) : clsSaveState === "saved" ? (
+                            <span className="text-emerald-700">Enregistré</span>
+                          ) : clsSaveState === "error" ? (
+                            <span className="text-red-600">
+                              Erreur{clsSaveError ? `: ${clsSaveError}` : ""}
+                            </span>
+                          ) : (
+                            <span className="text-neutral-400"> </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div>
+                          <div className="mb-1 text-xs text-neutral-500">Catégorie</div>
+                          <select
+                            className="h-8 w-full rounded-lg bg-red-50 px-2 text-xs font-semibold text-red-700 ring-1 ring-red-100 hover:bg-red-100"
+                            value={clsCategory}
+                            onChange={(e) => {
+                              setClsCategory(e.target.value);
+                              setClsSubCategory("");
+                            }}
+                          >
+                            <option value="">—</option>
+                            {categoryOptions.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <div className="mb-1 text-xs text-neutral-500">Sous-catégorie</div>
+                          <select
+                            className="h-8 w-full rounded-lg bg-neutral-100 px-2 text-xs font-medium text-neutral-800 ring-1 ring-neutral-200 hover:bg-neutral-50"
+                            value={clsSubCategory}
+                            onChange={(e) => setClsSubCategory(e.target.value)}
+                          >
+                            <option value="">—</option>
+                            {subCategoryOptions.map((s) => (
+                              <option key={s} value={s}>
+                                {s}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <div className="mb-2 text-xs text-neutral-500">Composants</div>
+
+                          {clsComponents.length > 0 ? (
+                            <div className="mb-2 flex flex-wrap gap-2">
+                              {clsComponents.map((c) => (
+                                <span
+                                  key={c}
+                                  className="inline-flex items-center gap-1.5 rounded-md bg-neutral-100 px-2 py-0.5 text-xs font-medium text-neutral-800 ring-1 ring-neutral-200"
+                                >
+                                  {c}
+                                  <button
+                                    type="button"
+                                    className="text-neutral-500 hover:text-neutral-900"
+                                    onClick={() => removeComponent(c)}
+                                    aria-label={`Retirer ${c}`}
+                                  >
+                                    ×
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+
+                          <input
+                            className="h-8 w-full rounded-lg bg-white px-2 text-xs text-neutral-900 ring-1 ring-neutral-200 placeholder:text-neutral-400"
+                            placeholder="Ajouter composant…"
+                            value={componentDraft}
+                            list="components_suggestions_context"
+                            onChange={(e) => setComponentDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                addComponent();
+                              }
+                            }}
+                          />
+
+                          <datalist id="components_suggestions_context">
+                            {componentSuggestions.map((c) => (
+                              <option key={c} value={c} />
+                            ))}
+                          </datalist>
+
+                          <button
+                            type="button"
+                            className="mt-2 h-7 rounded-lg border border-neutral-200 bg-white px-3 text-xs font-medium text-neutral-800 hover:bg-neutral-50 disabled:opacity-50"
+                            onClick={addComponent}
+                            disabled={!componentDraft.trim()}
+                          >
+                            Ajouter
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-orange-100 bg-orange-50/30 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-orange-700">
+                          Symptômes
+                        </div>
+
+                        <button
+                          type="button"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white text-sm text-neutral-700 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Générer avec l’IA"
+                          disabled={clsAiLoadingField !== null || clsTextSaveState === "saving"}
+                          onClick={() => void handleGenerateClassificationText("symptom")}
+                        >
+                          {clsAiLoadingField === "symptom" ? "…" : "✨"}
+                        </button>
+                      </div>
+
+                      <textarea
+                        className="min-h-[170px] w-full rounded-xl bg-white px-3 py-2 text-sm leading-relaxed text-neutral-900 ring-1 ring-orange-100 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-orange-200"
+                        placeholder="Décrire le symptôme…"
+                        value={clsSymptom}
+                        onChange={(e) => {
+                          setClsSymptom(e.target.value);
+                          setClsTextDirty(true);
+                          if (clsTextSaveState !== "idle") {
+                            setClsTextSaveState("idle");
+                            setClsTextSaveError(null);
+                          }
+                        }}
+                      />
+                    </div>
+
+                    <div className="rounded-2xl border border-orange-100 bg-orange-50/30 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-orange-700">
+                          Synthèse
+                        </div>
+
+                        <button
+                          type="button"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-white text-sm text-neutral-700 ring-1 ring-neutral-200 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          title="Générer avec l’IA"
+                          disabled={clsAiLoadingField !== null || clsTextSaveState === "saving"}
+                          onClick={() => void handleGenerateClassificationText("synthese")}
+                        >
+                          {clsAiLoadingField === "synthese" ? "…" : "✨"}
+                        </button>
+                      </div>
+
+                      <textarea
+                        className="min-h-[170px] w-full rounded-xl bg-white px-3 py-2 text-sm leading-relaxed text-neutral-900 ring-1 ring-orange-100 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-orange-200"
+                        placeholder="Résumer le diagnostic ou la situation…"
+                        value={clsSynthese}
+                        onChange={(e) => {
+                          setClsSynthese(e.target.value);
+                          setClsTextDirty(true);
+                          if (clsTextSaveState !== "idle") {
+                            setClsTextSaveState("idle");
+                            setClsTextSaveError(null);
+                          }
+                        }}
+                      />
+
+                      <div className="mt-3 flex items-center justify-between gap-3">
+                        <Button
+                          variant="outline"
+                          className="h-9 px-3 py-1 text-xs"
+                          disabled={clsTextSaveState === "saving" || !clsTextDirty}
+                          onClick={() => void saveClassificationTextsNow()}
+                        >
+                          {clsTextSaveState === "saving" ? "Enregistrement…" : "Enregistrer contexte"}
+                        </Button>
+
+                        <div className="text-xs">
+                          {clsAiError ? (
+                            <span className="text-red-600">{clsAiError}</span>
+                          ) : clsTextSaveState === "saved" ? (
+                            <span className="text-emerald-700">Texte enregistré</span>
+                          ) : clsTextSaveState === "error" ? (
+                            <span className="text-red-600">
+                              Erreur{clsTextSaveError ? `: ${clsTextSaveError}` : ""}
+                            </span>
+                          ) : (
+                            <span className="text-neutral-400"> </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl bg-neutral-50 px-4 py-3 text-sm text-neutral-600 ring-1 ring-neutral-200">
+                    Sélectionne une session SAV pour afficher son contexte.
+                  </div>
+                )}
+              </Card>
+              </>
+              ) : null}
             </div>
 
             {/* Right column */}
-            <div className="col-span-12 lg:col-span-8">
-              <section className="rounded-2xl bg-white ring-1 ring-neutral-200 shadow-sm">
+            <div
+              className={cx(
+                "col-span-12 lg:col-span-9",
+                mainTab === "CHANTIER" ? "hidden" : "",
+              )}
+            >
+              <section className="space-y-6">
                 {/* Header inside right card */}
-                <div className="flex flex-col gap-4 border-b border-neutral-100 px-5 py-4 md:flex-row md:items-center md:justify-between">
+                <div className="hidden">
                   <div className="flex items-center gap-3 flex-nowrap min-w-0">
                     <h2 className="text-base font-semibold text-neutral-900">
                       Session SAV (événement)
@@ -3325,9 +4201,9 @@ export default function ChantierDetailPage() {
                   </div>
                 ) : null}
 
-                <div className="px-5 py-5">
-                  {/* Classification (editable + PATCH) */}
-                  <div>
+                <div className="space-y-6">
+                  {/* Classification déplacée dans la colonne gauche */}
+                  <div className="hidden">
                     <div className="flex items-center justify-between gap-3">
                       <h3 className="text-sm font-semibold text-neutral-900">
                         Classification
@@ -3552,9 +4428,9 @@ export default function ChantierDetailPage() {
                   </div>
 
                   {/* Note en cours */}
-                  <div>
+                  <div className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
                     <div className="flex items-center justify-between gap-3">
-                      <h3 className="text-sm font-semibold text-neutral-900">Note en cours</h3>
+                      <h3 className="text-xl font-semibold text-neutral-900">Note en cours</h3>
 
                       <div className="flex items-center gap-2">
                         {activeNoteId && activeNoteId !== "__draft__" ? (
@@ -3623,9 +4499,9 @@ export default function ChantierDetailPage() {
                       }}
                     />
 
-                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-12">
+                    <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-12">
                       {/* Interlocuteur */}
-                      <div className="md:col-span-4">
+                      <div className="md:col-span-5">
                         <div className="mb-2 text-xs text-neutral-500">Interlocuteur</div>
                         <select
                           className="h-10 w-full rounded-xl bg-white px-3 text-sm font-medium text-neutral-900 ring-1 ring-neutral-200 hover:bg-neutral-50"
@@ -3677,12 +4553,12 @@ export default function ChantierDetailPage() {
                       </div>
 
                       {/* Compteurs inclure */}
-                      <div className="md:col-span-4">
+                      <div className="md:col-span-3">
                         <div className="mb-2 text-xs text-neutral-500">Inclure</div>
-                        <div className="flex h-10 items-center justify-between rounded-xl bg-neutral-50 px-3 text-sm text-neutral-900 ring-1 ring-neutral-200">
-                          <span>{includesInputCount} input</span>
-                          <span>{includesOutputCount} output</span>
-                          <span>{includesFileCount} fichier</span>
+                        <div className="flex h-10 items-center justify-between rounded-xl border border-orange-200 bg-orange-50 px-3 text-sm font-semibold text-orange-900">
+                          <span>{includesInputCount} photo{includesInputCount > 1 ? "s" : ""}</span>
+                          <span>{includesOutputCount} visuel{includesOutputCount > 1 ? "s" : ""}</span>
+                          <span>{includesFileCount} fichier{includesFileCount > 1 ? "s" : ""}</span>
                         </div>
                       </div>
                     </div>
@@ -3690,8 +4566,8 @@ export default function ChantierDetailPage() {
                     {/* Textarea */}
                     <div className="mt-4">
                       <textarea
-                        rows={4}
-                        className="min-h-[92px] w-full resize-none overflow-hidden rounded-xl bg-amber-50 px-3 py-2 text-sm text-neutral-900 ring-1 ring-amber-200 placeholder:text-neutral-400"
+                        rows={6}
+                        className="min-h-[240px] w-full rounded-2xl bg-white px-4 py-3 text-base leading-relaxed text-neutral-900 ring-1 ring-neutral-200 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-orange-200"
                         placeholder="Écrire la note…"
                         value={noteText}
                         onChange={(e) => {
@@ -3816,7 +4692,7 @@ export default function ChantierDetailPage() {
                     ) : null}
 
                     {/* Ligne actions (upload à gauche, enregistrer à droite) */}
-                      <div className="mt-3 flex items-center justify-between gap-3">
+                      <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         {/* Gauche */}
                         <div className="flex flex-wrap items-center gap-2">
                           <Button
@@ -3854,7 +4730,7 @@ export default function ChantierDetailPage() {
                         {/* Droite (zone verte) */}
                         <div className="flex items-start gap-3">
                           <Button
-                            className="h-9 px-4 text-xs"
+                            className="h-11 px-5 text-sm"
                             disabled={uploadBusy || !noteDirty || noteSaveState === "saving"}
                             onClick={saveNoteNow}
                           >
@@ -3863,7 +4739,7 @@ export default function ChantierDetailPage() {
 
                           <Button
                             variant="solid"
-                            className="h-9 px-4 text-xs"
+                            className="h-11 bg-orange-600 px-6 text-sm hover:bg-orange-700"
                             disabled={
                               uploadBusy ||
                               noteSaveState === "saving" ||
@@ -3906,12 +4782,15 @@ export default function ChantierDetailPage() {
                       </div>
                   </div>
 
-                  <div className="my-6 border-t border-neutral-100" />
-
                   {/* Visuels & fichiers */}
-                  <div>
+                  <div className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
                     <div className="flex items-center justify-between gap-3">
-                      <h3 className="text-sm font-semibold text-neutral-900">Visuels & fichiers</h3>
+                      <div>
+                        <h3 className="text-xl font-semibold text-neutral-900">Visuels & documents</h3>
+                        <div className="mt-1 text-sm text-neutral-500">
+                          Sélection des éléments inclus dans la note active.
+                        </div>
+                      </div>
 
                       <div className="flex items-center gap-2">
                         <button
@@ -3922,7 +4801,7 @@ export default function ChantierDetailPage() {
                           )}
                           onClick={() => setVfTab("input")}
                         >
-                          Visuels input
+                          Photos reçues
                         </button>
                         <button
                           type="button"
@@ -3932,7 +4811,7 @@ export default function ChantierDetailPage() {
                           )}
                           onClick={() => setVfTab("output")}
                         >
-                          Visuels output
+                          Visuels créés
                         </button>
                         <button
                           type="button"
@@ -3944,6 +4823,17 @@ export default function ChantierDetailPage() {
                         >
                           Fichiers
                         </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-950">
+                      <div className="font-semibold">
+                        Inclusions pour la note active
+                      </div>
+                      <div className="mt-1">
+                        {includesInputCount} photo{includesInputCount > 1 ? "s" : ""} ·{" "}
+                        {includesOutputCount} visuel{includesOutputCount > 1 ? "s" : ""} ·{" "}
+                        {includesFileCount} fichier{includesFileCount > 1 ? "s" : ""} inclus
                       </div>
                     </div>
 
@@ -3995,7 +4885,7 @@ export default function ChantierDetailPage() {
                         <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
                         {/* Preview */}
                         <div className="lg:col-span-8">
-                          <div className="relative flex h-[360px] items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200">
+                          <div className="relative flex h-[460px] items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200">
                             {activePhoto?.url ? (
                               <>
                                 <button
@@ -4091,7 +4981,7 @@ export default function ChantierDetailPage() {
                         <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
                           {/* Preview */}
                           <div className="lg:col-span-8">
-                            <div className="relative flex h-[360px] items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200">
+                            <div className="relative flex h-[460px] items-center justify-center overflow-hidden rounded-2xl bg-neutral-50 ring-1 ring-neutral-200">
                               {activeOutputAsset?.url ? (
                                 <>
                                   {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -4218,13 +5108,11 @@ export default function ChantierDetailPage() {
                     ) : null}
                   </div>
 
-                  <div className="my-6 border-t border-neutral-100" />
-
                   {/* Historique des notes */}
-                  <div>
+                  <div className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <h3 className="text-sm font-semibold text-neutral-900">Historique des notes</h3>
+                        <h3 className="text-xl font-semibold text-neutral-900">Historique des notes</h3>
                         <div className="mt-1 text-xs text-neutral-500">
                           Timeline — plus lisible quand il y a beaucoup de notes.
                         </div>
@@ -4320,6 +5208,7 @@ export default function ChantierDetailPage() {
             </div>
           </div>
         )}
+        </div>
       </main>
       {isPhotoFullscreenOpen && fullscreenUrl ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
@@ -4339,6 +5228,6 @@ export default function ChantierDetailPage() {
           />
         </div>
       ) : null}
-    </div>
+    </AppShell>
   );
 }

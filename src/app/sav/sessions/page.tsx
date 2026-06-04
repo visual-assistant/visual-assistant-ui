@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import AppShell from "../../../components/AppShell";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_INTERNAL_API || "http://localhost:8001";
@@ -1040,7 +1041,7 @@ export default function SavSessionsListPage() {
 
     return (
       <div className="overflow-x-auto">
-        <table className="min-w-full text-sm table-fixed">
+        <table className="min-w-full table-fixed text-sm">
           <colgroup>
             <col className="w-[170px]" />
             <col className="w-[120px]" />
@@ -1053,18 +1054,18 @@ export default function SavSessionsListPage() {
             <col className="w-[240px]" />
           </colgroup>
           <thead>
-            <tr className="border-b border-neutral-200 bg-neutral-50">
-              <th className="text-left py-2 px-2">Dernière activité</th>
-              <th className="text-left py-2 px-2">Statut</th>
+            <tr className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wide text-slate-600">
+              <th className="px-7 py-4 text-left font-semibold">Dernière activité</th>
+              <th className="px-4 py-4 text-left font-semibold">Statut</th>
               {showOwnerColumn ? (
-                <th className="text-left py-2 px-2">Propriétaire</th>
+                <th className="px-4 py-4 text-left font-semibold">Propriétaire</th>
               ) : null}
-              <th className="text-left py-2 px-2">Installateur</th>
-              <th className="text-left py-2 px-2">Chantier</th>
-              <th className="text-left py-2 px-2">Numéros</th>
-              <th className="text-left py-2 px-2">Sessions</th>
-              <th className="text-left py-2 px-2">Photos</th>
-              <th className="text-left py-2 px-2">Actions</th>
+              <th className="px-4 py-4 text-left font-semibold">Installateur</th>
+              <th className="px-4 py-4 text-left font-semibold">Chantier</th>
+              <th className="px-4 py-4 text-left font-semibold">Numéros</th>
+              <th className="px-4 py-4 text-left font-semibold">Sessions</th>
+              <th className="px-4 py-4 text-left font-semibold">Photos</th>
+              <th className="px-4 py-4 text-left font-semibold">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1092,8 +1093,8 @@ export default function SavSessionsListPage() {
                 <tr
                   key={c.group_key}
                   className={[
-                    "border-b border-neutral-100 hover:bg-neutral-50",
-                    isUnseen ? "bg-blue-50" : "",
+                    "border-b border-slate-100 hover:bg-slate-50",
+                    isUnseen ? "bg-orange-50/40" : "",
                   ].join(" ")}
                 >
                   <td className="py-2 px-2 align-top">
@@ -1232,121 +1233,116 @@ export default function SavSessionsListPage() {
     );
   };
 
-  return (
-    <main className="min-h-screen bg-neutral-100 text-neutral-900 p-6 flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Visual Assistant · Inbox SAV</h1>
+    return (
+    <AppShell>
+      <main className="min-h-screen bg-slate-50 text-slate-950">
+        <div className="sticky top-0 z-30 border-b border-slate-200 bg-slate-50/95 px-10 py-7 backdrop-blur">
+          <div className="mb-7 flex items-start justify-between gap-6">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight text-slate-950">
+              Liste Chantiers
+            </h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Gestion des chantiers et sessions SAV
+            </p>
+          </div>
 
-        {/* ✅ header right: user dropdown + actions (Accueil supprimé) */}
-        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3">
+            <select
+              className="h-11 rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none hover:bg-slate-50"
+              value={currentUser}
+              onChange={(e) => persistCurrentUser(e.target.value)}
+              title="Utilisateur courant (sert à attribuer les activités)"
+            >
+              {USERS.map((u) => (
+                <option key={u} value={u}>
+                  {u}
+                </option>
+              ))}
+            </select>
+
+            <button
+              onClick={openCreateChantierModal}
+              className="inline-flex h-11 items-center rounded-xl bg-orange-600 px-5 text-sm font-semibold text-white shadow-sm hover:bg-orange-700"
+            >
+              + Nouveau chantier
+            </button>
+
+            <button
+              onClick={fetchOverview}
+              className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-lg text-slate-700 shadow-sm hover:bg-slate-50"
+              title="Actualiser"
+            >
+              {isRefreshing ? "…" : "↻"}
+            </button>
+          </div>
+        </div>
+
+        
+        <div className="flex items-center gap-4">
+          <div className="relative flex-1">
+            <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
+              ⌕
+            </span>
+            <input
+              className="h-12 w-full rounded-xl border border-slate-200 bg-white pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+              placeholder="Recherche (chantier / installateur / numéro...)"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") fetchOverview();
+              }}
+            />
+          </div>
+
           <select
-            className="rounded-lg border border-neutral-300 px-2 py-1 text-sm bg-white"
-            value={currentUser}
-            onChange={(e) => persistCurrentUser(e.target.value)}
-            title="Utilisateur courant (sert à attribuer les activités)"
+            className="h-12 rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none hover:bg-slate-50"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            title="Filtrer par statut"
           >
+            <option value="">Statut : Tous</option>
+            <option value="A_TRAITER">Statut : À traiter</option>
+            <option value="RESOLU">Statut : Résolu</option>
+          </select>
+
+          <select
+            className="h-12 rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none hover:bg-slate-50"
+            value={ownerFilter}
+            onChange={(e) => setOwnerFilter(e.target.value)}
+            title="Filtrer par propriétaire"
+          >
+            <option value="">Propriétaire : Tous</option>
             {USERS.map((u) => (
               <option key={u} value={u}>
-                {u}
+                Propriétaire : {u}
               </option>
             ))}
           </select>
 
-          {isRefreshing && <span className="text-xs text-neutral-400">⟳</span>}
           <button
-            onClick={openCreateChantierModal}
-            className="text-sm px-3 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50"
-          >
-            + Nouveau chantier
-          </button>
-          <button
+            className="h-12 rounded-xl bg-orange-600 px-6 text-sm font-semibold text-white shadow-sm hover:bg-orange-700"
             onClick={fetchOverview}
-            className="text-sm px-3 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50"
           >
-            Actualiser
+            Rechercher
           </button>
-
-          <Link
-            href="/generateur"
-            className="text-sm text-neutral-600 hover:text-neutral-900 underline-offset-2 hover:underline"
-          >
-            ← Retour générateur
-          </Link>
-        </div>
-      </div>
-
-      <section className="bg-white shadow rounded-xl p-4 flex flex-col gap-4">
-        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h2 className="text-lg font-medium">SAV · Sessions & Chantiers</h2>
-            <p className="text-sm text-neutral-500">
-              Les sessions non rattachées sont affichées en premier (priorité).
-            </p>
-          </div>
-
-          <div className="flex flex-col md:flex-row gap-2 md:items-center">
-            <label className="text-sm text-neutral-700">
-              Statut :
-              <select
-                className="ml-2 rounded-lg border border-neutral-300 px-2 py-1 text-sm bg-white"
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-              >
-                <option value="">Tous</option>
-                <option value="A_TRAITER">À traiter</option>
-                <option value="RESOLU">Résolu</option>
-              </select>
-            </label>
-
-            <label className="text-sm text-neutral-700">
-              Propriétaire :
-              <select
-                className="ml-2 rounded-lg border border-neutral-300 px-2 py-1 text-sm bg-white"
-                value={ownerFilter}
-                onChange={(e) => setOwnerFilter(e.target.value)}
-              >
-                <option value="">Tous</option>
-                {USERS.map((u) => (
-                  <option key={u} value={u}>
-                    {u}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="flex items-center gap-2">
-              <input
-                className="rounded-lg border border-neutral-300 px-3 py-1 text-sm bg-white w-full md:w-64"
-                placeholder="Recherche (chantier / installateur / numéro / session)…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") fetchOverview();
-                }}
-              />
-              <button
-                className="text-sm px-3 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50"
-                onClick={fetchOverview}
-              >
-                Rechercher
-              </button>
-            </div>
-          </div>
         </div>
 
-        {/* WhatsApp block */}
-        <div className="mt-1">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-            <div className="text-sm text-neutral-700 font-medium">
-              Envoyer WhatsApp
-              <span className="ml-2 text-xs text-neutral-500 font-normal">
-                (le client pourra envoyer les photos directement)
-              </span>
+        {/* WhatsApp block conservé pour l’instant */}
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">
+                Envoyer WhatsApp
+              </div>
+              <div className="mt-1 text-sm text-slate-500">
+                Le client pourra envoyer les photos directement.
+              </div>
             </div>
 
-            <div className="flex flex-col md:flex-row md:items-center gap-2">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center">
               <input
-                className="rounded-lg border border-neutral-300 px-3 py-1 text-sm bg-white w-full md:w-56"
+                className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none placeholder:text-slate-400 focus:border-orange-300 focus:ring-2 focus:ring-orange-100 md:w-64"
                 placeholder="Téléphone (06… ou +33…)"
                 value={waPhone}
                 onChange={(e) => setWaPhone(e.target.value)}
@@ -1355,7 +1351,7 @@ export default function SavSessionsListPage() {
                 }}
               />
               <button
-                className="text-sm px-3 py-1 rounded-lg border border-neutral-300 bg-white hover:bg-neutral-50 disabled:opacity-50"
+                className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
                 onClick={sendWhatsAppTemplate}
                 disabled={waSending}
                 title="Envoie le template WhatsApp pour demander les photos"
@@ -1364,81 +1360,67 @@ export default function SavSessionsListPage() {
               </button>
 
               {waMsg && (
-                <div className="text-xs text-neutral-600 md:ml-2">{waMsg}</div>
+                <div className="text-xs text-slate-500 md:ml-2">{waMsg}</div>
               )}
             </div>
-          </div>
+            </div>
+        </div>
         </div>
 
-        {loading && <div className="text-sm text-neutral-500">Chargement…</div>}
+        <section className="flex flex-col gap-8 px-10 py-7">
+        {loading && (
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-500 shadow-sm">
+            Chargement…
+          </div>
+        )}
 
         {!loading && error && (
-          <div className="text-sm text-red-600">{error}</div>
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {error}
+          </div>
         )}
 
         {!loading && !error && deleteError && (
-          <div className="text-sm text-red-600">{deleteError}</div>
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {deleteError}
+          </div>
         )}
 
         {!loading && !error && statusError && (
-          <div className="text-sm text-red-600">{statusError}</div>
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {statusError}
+          </div>
         )}
 
         {!loading && !error && ownerError && (
-          <div className="text-sm text-red-600">{ownerError}</div>
+          <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {ownerError}
+          </div>
         )}
 
         {!loading && !error && (
-          <div className="flex flex-col gap-6">
-            {/* 1) Unattached FIRST */}
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <div className="flex flex-col">
-                  <div className="text-sm font-semibold text-neutral-900">
-                    Sessions non rattachées
-                  </div>
-                  <div className="text-xs text-neutral-500">
-                    À traiter en priorité (photos arrivées récemment).
-                  </div>
-                </div>
-                <div className="text-xs text-neutral-500">
-                  {filteredUnattached.length} élément(s)
-                </div>
+          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex items-center justify-between border-b border-slate-200 px-7 py-6">
+              <div>
+                <h2 className="text-2xl font-semibold text-slate-950">
+                  Chantiers
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Regroupement par référence chantier
+                </p>
               </div>
 
-              <Table
-                rows={filteredUnattached}
-                emptyLabel="Aucune session non rattachée."
-                showAttachForUnattached={true}
-                showOwnerColumn={false}
-              />
-            </div>
-
-            <div className="border-t border-neutral-200" />
-
-            {/* 2) Chantiers */}
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <div className="flex flex-col">
-                  <div className="text-sm font-semibold text-neutral-900">
-                    Chantiers
-                  </div>
-                  <div className="text-xs text-neutral-500">
-                    Regroupement par référence chantier.
-                  </div>
-                </div>
-                <div className="text-xs text-neutral-500">
-                  {filteredChantiers.length} élément(s)
-                </div>
+              <div className="text-sm text-slate-500">
+                {filteredChantiers.length} élément(s)
               </div>
-
-              <Table
-                rows={filteredChantiers}
-                emptyLabel="Aucun chantier."
-                showAttachForUnattached={false}
-                showOwnerColumn={true}
-              />
             </div>
+
+            <Table
+              rows={filteredChantiers}
+              emptyLabel="Aucun chantier."
+              showAttachForUnattached={false}
+              showOwnerColumn={true}
+            />
           </div>
         )}
       </section>
@@ -1677,5 +1659,6 @@ export default function SavSessionsListPage() {
         </div>
       )}
     </main>
+    </AppShell>
   );
 }
