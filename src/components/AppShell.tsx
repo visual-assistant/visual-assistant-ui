@@ -35,9 +35,9 @@ const navItems = [
   },
   {
     label: "Paramètres",
-    href: "#",
+    href: "/settings",
     icon: Settings,
-    match: [],
+    match: ["/settings"],
   },
 ];
 
@@ -66,24 +66,6 @@ export default function AppShell({ children }: AppShellProps) {
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = isActive(item);
-
-            if (item.href === "#") {
-              return (
-                <button
-                  key={item.label}
-                  type="button"
-                  title={item.label}
-                  className={[
-                    "relative flex h-12 w-12 items-center justify-center rounded-2xl transition",
-                    active
-                      ? "bg-orange-50 text-orange-600"
-                      : "text-slate-400 hover:bg-slate-50 hover:text-slate-700",
-                  ].join(" ")}
-                >
-                  <Icon className="h-6 w-6" strokeWidth={2} />
-                </button>
-              );
-            }
 
             return (
               <Link
