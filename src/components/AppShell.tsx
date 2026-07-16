@@ -4,9 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   FileText,
-  Home,
   Inbox,
   Settings,
+  Sparkles,
   Wrench,
 } from "lucide-react";
 
@@ -16,10 +16,10 @@ type AppShellProps = {
 
 const navItems = [
   {
-    label: "Accueil",
-    href: "/",
-    icon: Home,
-    match: ["/"],
+    label: "Atelier",
+    href: "/atelier",
+    icon: Sparkles,
+    match: ["/atelier"],
   },
   {
     label: "Inbox SAV",
