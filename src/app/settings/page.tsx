@@ -254,8 +254,8 @@ function safeNum(v: unknown): number | null {
   return null;
 }
 
-function docId(doc: ProductDocument) {
-  return safeStr(doc.document_id || doc.id);
+function docId(doc?: ProductDocument | null) {
+  return safeStr(doc?.document_id || doc?.id);
 }
 
 function itemId(item: IndexSection | IndexAnchor) {
@@ -902,7 +902,11 @@ export default function SettingsPage() {
       ]);
       setCatalog(catalogData);
       setDocuments(docsData);
-      setSelectedDocId((current) => current || docId(docsData[0]) || null);
+      const firstDocId = docsData[0] ? docId(docsData[0]) : null;
+      setSelectedDocId((current) => {
+        if (current && docsData.some((doc) => docId(doc) === current)) return current;
+        return firstDocId;
+      });
     } catch (e) {
       console.error("product documents refresh error", e);
       setError(e instanceof Error ? e.message : "Erreur réseau.");
@@ -1120,7 +1124,7 @@ export default function SettingsPage() {
       }
 
       const remaining = documents.filter((doc) => docId(doc) !== selectedDocId);
-      setSelectedDocId(docId(remaining[0]) || null);
+      setSelectedDocId(remaining[0] ? docId(remaining[0]) : null);
       setSelectedItem(null);
       await refresh();
     } catch (e) {
