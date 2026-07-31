@@ -4,15 +4,20 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
-  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   ExternalLink,
   FileText,
   Image as ImageIcon,
   Loader2,
+  Mail,
+  MessageSquare,
+  Monitor,
   RefreshCw,
   Send,
   Sparkles,
+  X,
 } from "lucide-react";
 import AppShell from "@/components/AppShell";
 
@@ -48,17 +53,58 @@ const statusLabel: Record<string, string> = {
   DRAFT: "Brouillon",
 };
 
-const classificationSourceLabel: Record<string, string> = {
-  automatic: "Automatique",
-  provided: "Fourni",
-  manual_review: "Corrigé",
+const shareChannelLabel: Record<string, string> = {
+  WHATSAPP: "WhatsApp",
+  EMAIL: "Email",
+};
+
+const shareStatusLabel: Record<string, string> = {
+  SENT: "Envoyé",
+  FAILED: "Échec",
+  PENDING: "En attente",
+  PREPARED: "Préparé",
+};
+
+const visualKindLabel: Record<string, string> = {
+  anchor_crop: "Repère",
+  section_crop: "Section",
+  page_snapshot: "Page",
 };
 
 type VisualRef = {
+  visual_ref_id?: string | null;
+  id?: string | null;
   kind?: string | null;
   page?: number | null;
   url?: string | null;
+  relative_path?: string | null;
+  bbox?: number[] | null;
+  width?: number | null;
+  height?: number | null;
+  included?: boolean | null;
   local_path?: string | null;
+};
+
+type AtelierAnswerBlock = {
+  block_id?: string | null;
+  type?: string | null;
+  title?: string | null;
+  text?: string | null;
+  source_ids?: string[] | null;
+  visual_ref_ids?: string[] | null;
+  confidence?: string | null;
+  reason?: string | null;
+  order?: number | null;
+};
+
+type AtelierBlock = {
+  block_id?: string | null;
+  id?: string | null;
+  kind?: string | null;
+  title?: string | null;
+  text?: string | null;
+  visual_ref_ids?: string[] | null;
+  source_ids?: string[] | null;
 };
 
 type AtelierSource = {
@@ -77,6 +123,104 @@ type AtelierSource = {
   source_url?: string | null;
 };
 
+type AtelierDraft = {
+  title?: string | null;
+  answer_text?: string | null;
+  answer_blocks?: AtelierAnswerBlock[] | null;
+  supplementary_source_ids?: string[] | null;
+  supplementary_visual_ref_ids?: string[] | null;
+  composition_status?: string | null;
+  composition_reason?: string | null;
+  blocks?: AtelierBlock[] | null;
+  visual_refs?: VisualRef[] | null;
+  included_visual_ref_ids?: string[] | null;
+  is_modified?: boolean | null;
+  updated_at?: string | number | null;
+  updated_by?: string | null;
+};
+
+type AtelierRecipient = {
+  name?: string | null;
+  company?: string | null;
+  phone?: string | null;
+  email?: string | null;
+};
+
+type AtelierSharePreview = {
+  previews?: {
+    web?: {
+      public_url?: string | null;
+      title?: string | null;
+      visual_count?: number | null;
+    } | null;
+    whatsapp?: {
+      to?: string | null;
+      body?: string | null;
+    } | null;
+    email?: {
+      to?: string | null;
+      subject?: string | null;
+      body?: string | null;
+    } | null;
+  } | null;
+};
+
+type AtelierSendResponse = {
+  ok?: boolean;
+  error?: string | null;
+  question?: AtelierQuestion;
+  public_url?: string | null;
+  slug?: string | null;
+  send?: AtelierSend | null;
+  detail?: string;
+  message?: string;
+};
+
+type AtelierPublication = {
+  publication_id?: string | null;
+  slug?: string | null;
+  public_url?: string | null;
+  status?: string | null;
+  title?: string | null;
+  created_at?: string | number | null;
+  expires_at?: string | number | null;
+  revoked_at?: string | number | null;
+};
+
+type AtelierSend = {
+  send_id?: string | null;
+  channel?: "WHATSAPP" | "EMAIL" | string | null;
+  recipient?: AtelierRecipient | null;
+  status?: string | null;
+  error?: string | null;
+  public_url?: string | null;
+  slug?: string | null;
+  created_at?: string | number | null;
+  sent_at?: string | number | null;
+};
+
+type AtelierShareSummary = {
+  has_been_shared?: boolean | null;
+  has_publication?: boolean | null;
+  publication_count?: number | null;
+  active_publication_count?: number | null;
+  send_count?: number | null;
+  sent_count?: number | null;
+  failed_send_count?: number | null;
+  last_channel?: "WHATSAPP" | "EMAIL" | string | null;
+  last_recipient?: string | null;
+  last_recipient_name?: string | null;
+  last_recipient_company?: string | null;
+  last_status?: string | null;
+  last_send_status?: string | null;
+  last_error?: string | null;
+  last_public_url?: string | null;
+  last_shared_at?: string | number | null;
+  last_sent_at?: string | number | null;
+  draft_is_modified?: boolean | null;
+  included_visual_count?: number | null;
+};
+
 type AtelierQuestion = {
   question_id: string;
   status?: string | null;
@@ -89,6 +233,11 @@ type AtelierQuestion = {
   answer_text?: string | null;
   sources?: AtelierSource[] | null;
   visual_refs?: VisualRef[] | null;
+  blocks?: AtelierBlock[] | null;
+  draft?: AtelierDraft | null;
+  publications?: AtelierPublication[] | null;
+  sends?: AtelierSend[] | null;
+  share_summary?: AtelierShareSummary | null;
   meta?: {
     revision_count?: number | null;
     previous_questions?: Array<{
@@ -110,6 +259,20 @@ type QuestionsListResponse =
       data?: AtelierQuestion[];
     };
 
+type ShareChannel = "WHATSAPP" | "EMAIL";
+
+type RenderAnswerBlock = {
+  block_id: string;
+  type?: string | null;
+  title?: string | null;
+  text?: string | null;
+  source_ids: string[];
+  visual_ref_ids: string[];
+  confidence?: string | null;
+  reason?: string | null;
+  order: number;
+};
+
 function formatDateTime(value?: string | number | null) {
   if (value === null || value === undefined || value === "") return "";
 
@@ -129,6 +292,12 @@ function formatDateTime(value?: string | number | null) {
   }).format(date);
 }
 
+function safeStr(value: unknown, fallback = "") {
+  if (value === null || value === undefined) return fallback;
+  const str = String(value).trim();
+  return str || fallback;
+}
+
 function normalizeAssetUrl(value?: string | null) {
   if (!value) return null;
   const raw = value.trim();
@@ -139,7 +308,17 @@ function normalizeAssetUrl(value?: string | null) {
 }
 
 function selectVisualRefs(refs?: VisualRef[] | null) {
-  const usableRefs = (refs || []).filter((ref) => normalizeAssetUrl(ref.url));
+  const seen = new Set<string>();
+  const usableRefs = (refs || []).filter((ref) => {
+    const url = normalizeAssetUrl(ref.url);
+    if (!url) return false;
+
+    const key = visualRefDedupeKey(ref);
+
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const anchorCrops = usableRefs.filter((ref) => ref.kind === "anchor_crop");
   if (anchorCrops.length) return anchorCrops;
 
@@ -152,9 +331,156 @@ function selectVisualRefs(refs?: VisualRef[] | null) {
   return [];
 }
 
+function visualRefId(ref: VisualRef, index: number) {
+  return (
+    safeStr(ref.visual_ref_id) ||
+    safeStr(ref.id) ||
+    [safeStr(ref.kind, "visual_ref"), ref.page ?? index + 1, index].join("_")
+  );
+}
+
+function visualRefDedupeKey(ref: VisualRef) {
+  return [
+    safeStr(ref.kind, "visual_ref"),
+    ref.page ?? "",
+    normalizeAssetUrl(ref.url) || safeStr(ref.relative_path),
+  ].join("|");
+}
+
+function buildSourcesById(question?: AtelierQuestion | null) {
+  const entries = (question?.sources || [])
+    .filter((source) => safeStr(source.source_id))
+    .map((source) => [safeStr(source.source_id), source] as const);
+  return new Map(entries);
+}
+
+function buildVisualRefsById(question?: AtelierQuestion | null) {
+  const refs = question?.draft?.visual_refs?.length
+    ? question.draft.visual_refs
+    : question?.visual_refs || [];
+  const entries = refs
+    .map((ref, index) => [visualRefId(ref, index), ref] as const)
+    .filter(([id]) => Boolean(id));
+  return new Map(entries);
+}
+
+function getPrimaryAnswerBlocks(question?: AtelierQuestion | null): RenderAnswerBlock[] {
+  const answerBlocks = question?.draft?.answer_blocks || [];
+  if (answerBlocks.length) {
+    return answerBlocks
+      .map((block, index) => ({
+        block_id: safeStr(block.block_id, `answer_block_${index}`),
+        type: block.type,
+        title: block.title,
+        text: block.text,
+        source_ids: (block.source_ids || []).filter(Boolean),
+        visual_ref_ids: (block.visual_ref_ids || []).filter(Boolean),
+        confidence: block.confidence,
+        reason: block.reason,
+        order: block.order ?? index,
+      }))
+      .sort((a, b) => a.order - b.order);
+  }
+
+  const legacyBlocks = question?.draft?.blocks || [];
+  if (legacyBlocks.length) {
+    return legacyBlocks.map((block, index) => ({
+      block_id: safeStr(block.block_id || block.id, `legacy_block_${index}`),
+      type: block.kind || "legacy",
+      title: block.title,
+      text: block.text,
+      source_ids: (block.source_ids || []).filter(Boolean),
+      visual_ref_ids: (block.visual_ref_ids || []).filter(Boolean),
+      confidence: null,
+      reason: null,
+      order: index,
+    }));
+  }
+
+  const fallbackText = question?.draft?.answer_text || question?.answer_text || "";
+  if (!fallbackText.trim()) return [];
+
+  return [
+    {
+      block_id: "fallback_answer",
+      type: "answer",
+      title: null,
+      text: fallbackText,
+      source_ids: [],
+      visual_ref_ids: [],
+      confidence: null,
+      reason: null,
+      order: 0,
+    },
+  ];
+}
+
+function getSupplementarySources(question: AtelierQuestion | null | undefined, usedSourceIds: Set<string>) {
+  const sourcesById = buildSourcesById(question);
+  return (question?.draft?.supplementary_source_ids || [])
+    .filter((id) => !usedSourceIds.has(id))
+    .map((id) => sourcesById.get(id))
+    .filter((source): source is AtelierSource => Boolean(source));
+}
+
+function getSupplementaryVisualRefs(question: AtelierQuestion | null | undefined, usedVisualRefIds: Set<string>) {
+  const visualRefsById = buildVisualRefsById(question);
+  const seen = new Set<string>();
+  return (question?.draft?.supplementary_visual_ref_ids || [])
+    .filter((id) => !usedVisualRefIds.has(id))
+    .map((id) => visualRefsById.get(id))
+    .filter((ref): ref is VisualRef => Boolean(ref))
+    .filter((ref, index) => {
+      const key = visualRefId(ref, index);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function dedupeVisualRefs(refs: VisualRef[]) {
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = visualRefDedupeKey(ref);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sameStringList(a: string[], b: string[]) {
+  const cleanA = [...new Set(a.filter(Boolean))].sort();
+  const cleanB = [...new Set(b.filter(Boolean))].sort();
+  if (cleanA.length !== cleanB.length) return false;
+  return cleanA.every((value, index) => value === cleanB[index]);
+}
+
+function apiErrorMessage(status: number, fallback?: string | null) {
+  if (fallback) return fallback;
+  if (status === 400) return "Champ destinataire manquant ou invalide.";
+  if (status === 404) return "Question ou publication introuvable.";
+  if (status === 410) return "Lien public expiré ou révoqué.";
+  return `Erreur backend (${status}).`;
+}
+
 function pagesLabel(pages?: number[] | null) {
   if (!pages?.length) return "Pages non précisées";
   return `Page${pages.length > 1 ? "s" : ""} ${pages.join(", ")}`;
+}
+
+function shareRecipientLabel(summary?: AtelierShareSummary | null) {
+  if (!summary) return "";
+  return (
+    summary.last_recipient_name ||
+    summary.last_recipient_company ||
+    summary.last_recipient ||
+    ""
+  );
+}
+
+function shareSummaryDate(summary?: AtelierShareSummary | null) {
+  const value = summary?.last_shared_at || summary?.last_sent_at;
+  return value ? formatDateTime(value) : "";
 }
 
 function questionListFromResponse(payload: QuestionsListResponse) {
@@ -198,6 +524,538 @@ function StatusBadge({ status }: { status?: string | null }) {
   );
 }
 
+function SharePanel({
+  question,
+  visualRefs,
+  onQuestionUpdated,
+  onClose,
+}: {
+  question: AtelierQuestion;
+  visualRefs: VisualRef[];
+  onQuestionUpdated: (question: AtelierQuestion) => void;
+  onClose: () => void;
+}) {
+  const draftVisualRefs = question.draft?.visual_refs?.length
+    ? selectVisualRefs(question.draft.visual_refs)
+    : visualRefs;
+  const initialIncludedIds = Array.isArray(question.draft?.included_visual_ref_ids)
+    ? question.draft.included_visual_ref_ids.filter(Boolean)
+    : draftVisualRefs
+        .filter((ref) => ref.included !== false)
+        .map((ref, index) => visualRefId(ref, index));
+  const initialAnswerText = question.draft?.answer_text || question.answer_text || "";
+
+  const [channel, setChannel] = useState<ShareChannel>("WHATSAPP");
+  const [recipient, setRecipient] = useState<AtelierRecipient>({
+    name: "",
+    company: "",
+    phone: "",
+    email: "",
+  });
+  const [answerText, setAnswerText] = useState(initialAnswerText);
+  const [includedVisualRefIds, setIncludedVisualRefIds] = useState<string[]>(initialIncludedIds);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [isPreparingPreview, setIsPreparingPreview] = useState(false);
+  const [isSendingShare, setIsSendingShare] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftSaved, setDraftSaved] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendSuccess, setSendSuccess] = useState<string | null>(null);
+  const [sharePreview, setSharePreview] = useState<AtelierSharePreview | null>(null);
+  const [finalMessageBody, setFinalMessageBody] = useState("");
+  const [finalMessageSubject, setFinalMessageSubject] = useState("");
+
+  const draftChanged =
+    answerText.trim() !== initialAnswerText.trim() ||
+    !sameStringList(includedVisualRefIds, initialIncludedIds);
+
+  const updateRecipient = (key: keyof AtelierRecipient, value: string) => {
+    setRecipient((current) => ({ ...current, [key]: value }));
+  };
+
+  const applyPreviewMessageForChannel = (nextChannel: ShareChannel, preview = sharePreview) => {
+    if (!preview?.previews) return;
+    if (nextChannel === "EMAIL") {
+      setFinalMessageSubject(preview.previews.email?.subject || "");
+      setFinalMessageBody(preview.previews.email?.body || "");
+    } else {
+      setFinalMessageSubject("");
+      setFinalMessageBody(preview.previews.whatsapp?.body || "");
+    }
+  };
+
+  const selectChannel = (nextChannel: ShareChannel) => {
+    setChannel(nextChannel);
+    applyPreviewMessageForChannel(nextChannel);
+  };
+
+  const toggleVisualRef = (id: string) => {
+    setIncludedVisualRefIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    );
+  };
+
+  const saveDraftIfNeeded = async () => {
+    if (!draftChanged) {
+      setDraftSaved(true);
+      setDraftError(null);
+      return question;
+    }
+
+    setIsSavingDraft(true);
+    setDraftError(null);
+    setDraftSaved(false);
+
+    try {
+      const res = await fetch(
+        buildUrl(`/atelier/questions/${encodeURIComponent(question.question_id)}/draft`),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            answer_text: answerText,
+            included_visual_ref_ids: includedVisualRefIds,
+            updated_by: "service-technique",
+          }),
+        },
+      );
+
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(apiErrorMessage(res.status, payload?.detail || payload?.message));
+      }
+
+      const updatedQuestion = questionFromResponse(payload);
+      if (!updatedQuestion) throw new Error("Réponse Atelier invalide : question absente.");
+
+      onQuestionUpdated(updatedQuestion);
+      setDraftSaved(true);
+      return updatedQuestion;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Erreur inconnue pendant la sauvegarde.";
+      setDraftError(message);
+      throw err;
+    } finally {
+      setIsSavingDraft(false);
+    }
+  };
+
+  const prepareSharePreview = async () => {
+    setIsPreparingPreview(true);
+    setPreviewError(null);
+    setSendError(null);
+    setSendSuccess(null);
+
+    try {
+      await saveDraftIfNeeded();
+      const res = await fetch(
+        buildUrl(`/atelier/questions/${encodeURIComponent(question.question_id)}/share-preview`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            recipient,
+            actor: "service-technique",
+            ttl_days: 30,
+          }),
+        },
+      );
+
+      const payload = (await res.json().catch(() => null)) as AtelierSharePreview & {
+        detail?: string;
+        message?: string;
+      } | null;
+      if (!res.ok || !payload?.previews) {
+        throw new Error(apiErrorMessage(res.status, payload?.detail || payload?.message));
+      }
+
+      setSharePreview(payload);
+      applyPreviewMessageForChannel(channel, payload);
+      return payload;
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : "Erreur inconnue pendant la prévisualisation.");
+      return null;
+    } finally {
+      setIsPreparingPreview(false);
+    }
+  };
+
+  const fetchQuestionDetailForShare = async () => {
+    const res = await fetch(buildUrl(`/atelier/questions/${encodeURIComponent(question.question_id)}`), {
+      cache: "no-store",
+    });
+    const payload = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(apiErrorMessage(res.status, payload?.detail || payload?.message));
+    const detailQuestion = questionFromResponse(payload);
+    if (!detailQuestion) throw new Error("Détail Atelier invalide : question absente.");
+    return detailQuestion;
+  };
+
+  const sendShare = async () => {
+    setIsSendingShare(true);
+    setSendError(null);
+    setSendSuccess(null);
+
+    try {
+      await saveDraftIfNeeded();
+      const preview = sharePreview || (await prepareSharePreview());
+      if (!preview?.previews) {
+        throw new Error("Prévisualisation requise avant l'envoi.");
+      }
+      const fallbackBody =
+        channel === "EMAIL"
+          ? preview?.previews?.email?.body || ""
+          : preview?.previews?.whatsapp?.body || "";
+      const fallbackSubject = preview?.previews?.email?.subject || "";
+
+      const body = finalMessageBody || fallbackBody;
+      const subject = finalMessageSubject || fallbackSubject;
+
+      const res = await fetch(
+        buildUrl(`/atelier/questions/${encodeURIComponent(question.question_id)}/send`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel,
+            recipient,
+            actor: "service-technique",
+            ttl_days: 30,
+            message: {
+              body,
+              subject: channel === "EMAIL" ? subject : undefined,
+            },
+          }),
+        },
+      );
+
+      const payload = (await res.json().catch(() => null)) as AtelierSendResponse | null;
+      if (!res.ok || payload?.ok === false) {
+        throw new Error(apiErrorMessage(res.status, payload?.error || payload?.detail || payload?.message));
+      }
+
+      const updatedQuestion = payload?.question || (await fetchQuestionDetailForShare());
+      onQuestionUpdated(updatedQuestion);
+      const recipientLabel = recipient.name || recipient.company || recipient.email || recipient.phone || "destinataire";
+      setSendSuccess(`Réponse envoyée à ${recipientLabel} par ${shareChannelLabel[channel] || channel}.`);
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "Erreur inconnue pendant l'envoi.");
+    } finally {
+      setIsSendingShare(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-slate-950/20" onClick={onClose} />
+      <aside className="fixed right-0 top-0 z-50 flex h-screen w-[440px] max-w-full flex-col border-l border-slate-200 bg-white shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-50 text-orange-600">
+              <Send className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-slate-950">Partager la réponse</h2>
+              <p className="text-xs text-slate-500">Préparation du message destinataire</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            aria-label="Fermer le panneau de partage"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-5">
+          <div className="space-y-5">
+            <section className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Réponse sélectionnée</p>
+              <p className="mt-2 line-clamp-3 text-sm font-medium text-slate-900">
+                {question.question || "Question sans titre"}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                <span>{question.sources?.length || 0} source{question.sources?.length && question.sources.length > 1 ? "s" : ""}</span>
+                <span>·</span>
+                <span>{draftVisualRefs.length} visuel{draftVisualRefs.length > 1 ? "s" : ""}</span>
+              </div>
+            </section>
+
+            <section>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Canal</p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => selectChannel("WHATSAPP")}
+                  className={[
+                    "flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-medium transition",
+                    channel === "WHATSAPP"
+                      ? "border-orange-500 bg-orange-50 font-semibold text-orange-700"
+                      : "border-slate-200 text-slate-600 hover:border-slate-300",
+                  ].join(" ")}
+                >
+                  <MessageSquare className="h-4 w-4" />
+                  WhatsApp
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectChannel("EMAIL")}
+                  className={[
+                    "flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-medium transition",
+                    channel === "EMAIL"
+                      ? "border-orange-500 bg-orange-50 font-semibold text-orange-700"
+                      : "border-slate-200 text-slate-600 hover:border-slate-300",
+                  ].join(" ")}
+                >
+                  <Mail className="h-4 w-4" />
+                  Email
+                </button>
+              </div>
+            </section>
+
+            <section className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Destinataire</p>
+              <input
+                value={recipient.name || ""}
+                onChange={(event) => updateRecipient("name", event.target.value)}
+                placeholder="Nom du destinataire"
+                className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+              />
+              <input
+                value={recipient.company || ""}
+                onChange={(event) => updateRecipient("company", event.target.value)}
+                placeholder="Entreprise (optionnel)"
+                className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+              />
+              <input
+                value={recipient.phone || ""}
+                onChange={(event) => updateRecipient("phone", event.target.value)}
+                placeholder="Téléphone WhatsApp"
+                className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+              />
+              <input
+                value={recipient.email || ""}
+                onChange={(event) => updateRecipient("email", event.target.value)}
+                placeholder="Email"
+                className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-400 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+              />
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Texte de réponse</p>
+                <span className="text-xs text-slate-400">
+                  {draftChanged ? "Brouillon modifié" : "Lien valide 30 jours"}
+                </span>
+              </div>
+              <textarea
+                value={answerText}
+                onChange={(event) => setAnswerText(event.target.value)}
+                rows={9}
+                className="min-h-48 w-full resize-y rounded-lg border border-slate-200 px-3 py-3 text-sm leading-6 text-slate-800 outline-none transition focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+              />
+            </section>
+
+            <section>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Visuels inclus</p>
+                <span className="text-xs text-slate-400">
+                  {includedVisualRefIds.length}/{draftVisualRefs.length}
+                </span>
+              </div>
+              {draftVisualRefs.length ? (
+                <div className="space-y-2">
+                  {draftVisualRefs.map((ref, index) => {
+                    const id = visualRefId(ref, index);
+                    const imageUrl = normalizeAssetUrl(ref.url);
+                    const checked = includedVisualRefIds.includes(id);
+
+                    return (
+                      <label
+                        key={id}
+                        className="flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-3 hover:bg-slate-50"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleVisualRef(id)}
+                          className="mt-1 h-4 w-4 accent-orange-600"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                            <span className="font-medium text-slate-700">{ref.kind || "visual_ref"}</span>
+                            {ref.page ? <span>Page {ref.page}</span> : null}
+                          </div>
+                          {imageUrl ? (
+                            <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={imageUrl}
+                                alt={`Visuel partage page ${ref.page || index + 1}`}
+                                className="h-auto max-h-40 w-full object-contain"
+                              />
+                            </div>
+                          ) : (
+                            <p className="mt-1 text-xs text-slate-400">Image indisponible</p>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
+                  Aucun visuel sélectionnable pour cette réponse.
+                </p>
+              )}
+            </section>
+
+            <section className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">Prévisualisation</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Le brouillon est sauvegardé avant chaque préparation.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void prepareSharePreview()}
+                  disabled={isPreparingPreview || isSavingDraft}
+                  className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {isPreparingPreview ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                  {isPreparingPreview ? "Préparation..." : "Prévisualiser"}
+                </button>
+              </div>
+
+              {previewError ? (
+                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {previewError}
+                </div>
+              ) : null}
+
+              {sharePreview?.previews ? (
+                <div className="mt-4 space-y-4">
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Page web</p>
+                    <p className="mt-1 text-sm font-medium text-slate-900">
+                      {sharePreview.previews.web?.title || "Réponse Atelier"}
+                    </p>
+                    {sharePreview.previews.web?.public_url ? (
+                      <a
+                        href={sharePreview.previews.web.public_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-2 inline-flex max-w-full items-center gap-1 text-xs font-medium text-orange-700 hover:text-orange-800"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">{sharePreview.previews.web.public_url}</span>
+                      </a>
+                    ) : null}
+                    <p className="mt-2 text-xs text-slate-500">
+                      {sharePreview.previews.web?.visual_count ?? includedVisualRefIds.length} visuel
+                      {(sharePreview.previews.web?.visual_count ?? includedVisualRefIds.length) > 1 ? "s" : ""} inclus
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-200 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Message {channel === "EMAIL" ? "email" : "WhatsApp"}
+                    </p>
+                    {channel === "EMAIL" ? (
+                      <>
+                        <label className="mt-3 block text-xs font-medium text-slate-500">Objet</label>
+                        <input
+                          value={finalMessageSubject}
+                          onChange={(event) => setFinalMessageSubject(event.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+                        />
+                        <p className="mt-3 text-xs text-slate-500">
+                          Pour : {sharePreview.previews.email?.to || recipient.email || "email non renseigné"}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="mt-3 text-xs text-slate-500">
+                        Vers : {sharePreview.previews.whatsapp?.to || recipient.phone || "téléphone non renseigné"}
+                      </p>
+                    )}
+                    <label className="mt-3 block text-xs font-medium text-slate-500">Corps du message</label>
+                    <textarea
+                      value={finalMessageBody}
+                      onChange={(event) => setFinalMessageBody(event.target.value)}
+                      rows={7}
+                      className="mt-1 w-full resize-y rounded-lg border border-slate-200 px-3 py-3 text-sm leading-6 text-slate-800 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
+                  Renseignez le destinataire, ajustez le brouillon, puis cliquez sur Prévisualiser.
+                </p>
+              )}
+            </section>
+          </div>
+        </div>
+
+        <div className="border-t border-slate-200 bg-white px-5 py-4">
+          {draftError ? (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {draftError}
+            </div>
+          ) : draftSaved ? (
+            <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              Brouillon sauvegardé.
+            </div>
+          ) : null}
+          {sharePreview?.previews && !sendError && !sendSuccess ? (
+            <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+              Prévisualisation prête. Vous pouvez envoyer ou ajuster le message.
+            </div>
+          ) : null}
+          {sendError ? (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {sendError}
+            </div>
+          ) : null}
+          {sendSuccess ? (
+            <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {sendSuccess}
+            </div>
+          ) : null}
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-2">
+            <button
+              type="button"
+              onClick={() => void saveDraftIfNeeded()}
+              disabled={isSavingDraft || isPreparingPreview || isSendingShare || !draftChanged}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSavingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {isSavingDraft ? "Sauvegarde..." : "Sauver"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void sendShare()}
+              disabled={isSavingDraft || isPreparingPreview || isSendingShare}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-orange-600 px-4 py-3 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              {isSendingShare || isPreparingPreview ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              {isSendingShare
+                ? "Envoi en cours..."
+                : isPreparingPreview
+                  ? "Préparation..."
+                  : `Envoyer par ${shareChannelLabel[channel] || channel}`}
+            </button>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
 export default function AtelierPage() {
   const [questionText, setQuestionText] = useState("");
   const [currentQuestion, setCurrentQuestion] = useState<AtelierQuestion | null>(null);
@@ -206,9 +1064,16 @@ export default function AtelierPage() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
+  const [isComposingAnswer, setIsComposingAnswer] = useState(false);
   const [isEditingQuestion, setIsEditingQuestion] = useState(false);
+  const [isSharePanelOpen, setIsSharePanelOpen] = useState(false);
   const [editedQuestionText, setEditedQuestionText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [composeError, setComposeError] = useState<string | null>(null);
+  const [composeSuccess, setComposeSuccess] = useState(false);
+  const [isPreviewingPublicAnswer, setIsPreviewingPublicAnswer] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [isVisualPanelOpen, setIsVisualPanelOpen] = useState(false);
 
   const visualRefs = useMemo(
     () => selectVisualRefs(currentQuestion?.visual_refs),
@@ -295,6 +1160,19 @@ export default function AtelierPage() {
     }
   };
 
+  const applyQuestionUpdate = (updatedQuestion: AtelierQuestion) => {
+    setCurrentQuestion(updatedQuestion);
+    setEditedQuestionText(updatedQuestion.question || "");
+    setHistory((items) => {
+      const hasExistingItem = items.some((item) => item.question_id === updatedQuestion.question_id);
+      if (!hasExistingItem) return items;
+
+      return items.map((item) =>
+        item.question_id === updatedQuestion.question_id ? updatedQuestion : item,
+      );
+    });
+  };
+
   const regenerateQuestion = async () => {
     if (!currentQuestion?.question_id || isRegenerating) return;
 
@@ -330,23 +1208,91 @@ export default function AtelierPage() {
       const regeneratedQuestion = questionFromResponse(payload);
       if (!regeneratedQuestion) throw new Error("Réponse Atelier invalide : question absente.");
 
-      setCurrentQuestion(regeneratedQuestion);
+      applyQuestionUpdate(regeneratedQuestion);
       setEditedQuestionText(regeneratedQuestion.question || "");
       setIsEditingQuestion(false);
-      setHistory((items) => {
-        const nextItems = items.map((item) =>
-          item.question_id === regeneratedQuestion.question_id ? regeneratedQuestion : item,
-        );
-        return nextItems.sort((a, b) => {
-          const aDate = new Date((a.updated_at || a.created_at || 0) as string | number).getTime();
-          const bDate = new Date((b.updated_at || b.created_at || 0) as string | number).getTime();
-          return (Number.isNaN(bDate) ? 0 : bDate) - (Number.isNaN(aDate) ? 0 : aDate);
-        });
-      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue pendant la régénération.");
     } finally {
       setIsRegenerating(false);
+    }
+  };
+
+  const composeAnswer = async () => {
+    if (!currentQuestion?.question_id || isComposingAnswer) return;
+
+    setIsComposingAnswer(true);
+    setComposeError(null);
+    setComposeSuccess(false);
+
+    try {
+      const res = await fetch(
+        buildUrl(`/atelier/questions/${encodeURIComponent(currentQuestion.question_id)}/compose`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            use_draft: true,
+            use_ai: true,
+            actor: "service-technique",
+          }),
+        },
+      );
+
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(apiErrorMessage(res.status, payload?.detail || payload?.message));
+      }
+
+      const composedQuestion = questionFromResponse(payload);
+      if (!composedQuestion) throw new Error("Réponse Atelier invalide : question absente.");
+
+      applyQuestionUpdate(composedQuestion);
+      setComposeSuccess(true);
+    } catch (err) {
+      setComposeError(err instanceof Error ? err.message : "Erreur inconnue pendant la recomposition.");
+    } finally {
+      setIsComposingAnswer(false);
+    }
+  };
+
+  const previewPublicAnswer = async () => {
+    if (!currentQuestion?.question_id || isPreviewingPublicAnswer) return;
+
+    setIsPreviewingPublicAnswer(true);
+    setPreviewError(null);
+
+    try {
+      const res = await fetch(
+        buildUrl(`/atelier/questions/${encodeURIComponent(currentQuestion.question_id)}/public-link`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            actor: "service-technique",
+            ttl_days: 30,
+          }),
+        },
+      );
+
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(apiErrorMessage(res.status, payload?.detail || payload?.message));
+      }
+
+      const publicUrl = safeStr(payload?.public_url || payload?.url || payload?.publication?.public_url);
+      const slug = safeStr(payload?.slug || payload?.publication?.slug);
+      const previewUrl = publicUrl || (slug ? `/atelier/r/${encodeURIComponent(slug)}` : "");
+
+      if (!previewUrl) {
+        throw new Error("Lien public indisponible dans la réponse backend.");
+      }
+
+      window.open(previewUrl, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : "Impossible de prévisualiser la réponse.");
+    } finally {
+      setIsPreviewingPublicAnswer(false);
     }
   };
 
@@ -355,10 +1301,55 @@ export default function AtelierPage() {
     currentQuestion?.components?.length
       ? currentQuestion.components
       : currentQuestion?.detected_components || [];
-  const sourceLabel = currentQuestion?.classification_source
-    ? classificationSourceLabel[currentQuestion.classification_source] || currentQuestion.classification_source
-    : "Non précisée";
   const revisionCount = currentQuestion?.meta?.revision_count || 0;
+  const answerBlocks = useMemo(
+    () => getPrimaryAnswerBlocks(currentQuestion),
+    [currentQuestion],
+  );
+  const sourcesById = useMemo(
+    () => buildSourcesById(currentQuestion),
+    [currentQuestion],
+  );
+  const visualRefsById = useMemo(
+    () => buildVisualRefsById(currentQuestion),
+    [currentQuestion],
+  );
+  const usedAnswerSourceIds = useMemo(
+    () => new Set(answerBlocks.flatMap((block) => block.source_ids)),
+    [answerBlocks],
+  );
+  const usedAnswerVisualRefIds = useMemo(
+    () => new Set(answerBlocks.flatMap((block) => block.visual_ref_ids)),
+    [answerBlocks],
+  );
+  const supplementarySources = useMemo(
+    () => getSupplementarySources(currentQuestion, usedAnswerSourceIds),
+    [currentQuestion, usedAnswerSourceIds],
+  );
+  const supplementaryVisualRefs = useMemo(
+    () => dedupeVisualRefs(getSupplementaryVisualRefs(currentQuestion, usedAnswerVisualRefIds)),
+    [currentQuestion, usedAnswerVisualRefIds],
+  );
+  const answerBlockVisualsByBlockId = useMemo(() => {
+    const seen = new Set<string>();
+    const map = new Map<string, VisualRef[]>();
+
+    answerBlocks.forEach((block) => {
+      const refs = block.visual_ref_ids
+        .map((id) => visualRefsById.get(id))
+        .filter((ref): ref is VisualRef => Boolean(ref))
+        .filter((ref) => normalizeAssetUrl(ref.url))
+        .filter((ref) => {
+          const key = visualRefDedupeKey(ref);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      map.set(block.block_id, refs);
+    });
+
+    return map;
+  }, [answerBlocks, visualRefsById]);
 
   return (
     <AppShell>
@@ -424,13 +1415,14 @@ export default function AtelierPage() {
 
             {currentQuestion ? (
               <div className="space-y-5">
-                <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
+                <section className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Question posée</p>
+                      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-bold uppercase tracking-wide text-slate-400">Question posée</span>
+                        <StatusBadge status={currentQuestion.status} />
                         {revisionCount > 0 ? (
-                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-600">
+                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-500">
                             Régénérée {revisionCount} fois
                           </span>
                         ) : null}
@@ -476,8 +1468,8 @@ export default function AtelierPage() {
                           </div>
                         </div>
                       ) : (
-                        <div className="mt-1 flex flex-wrap items-start gap-3">
-                          <h2 className="min-w-0 flex-1 text-lg font-semibold text-slate-950">
+                        <div className="flex flex-wrap items-start gap-3">
+                          <h2 className="min-w-0 flex-1 text-base font-semibold leading-snug text-slate-950">
                             {currentQuestion.question}
                           </h2>
                           <button
@@ -486,58 +1478,108 @@ export default function AtelierPage() {
                               setEditedQuestionText(currentQuestion.question || "");
                               setIsEditingQuestion(true);
                             }}
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                            className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
                           >
                             Modifier
                           </button>
                         </div>
                       )}
                     </div>
-                    <StatusBadge status={currentQuestion.status} />
                   </div>
                 </section>
 
-                <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
+                <section className="space-y-5">
                   <div className="space-y-5">
-                    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <div className="mb-4 flex items-center gap-2">
-                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Classification détectée</h3>
-                      </div>
-                      <div className="space-y-3 text-sm">
-                        <div>
-                          <p className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Produit</p>
-                          {product ? (
-                            <span className="inline-flex rounded-full border border-orange-200 bg-orange-50 px-2.5 py-1 text-xs font-semibold text-orange-700">
-                              {product}
+                    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3 shadow-sm">
+                      <span className="shrink-0 text-xs font-bold uppercase tracking-wide text-slate-400">
+                        Détection auto.
+                      </span>
+                      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                        {product ? (
+                          <span className="inline-flex max-w-full rounded-full border border-orange-200 bg-orange-50 px-2.5 py-1 text-xs font-bold text-orange-700">
+                            <span className="truncate">{product}</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+                            Produit non identifié
+                          </span>
+                        )}
+                        {components.length ? (
+                          components.map((component) => (
+                            <span
+                              key={component}
+                              className="inline-flex max-w-full rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600"
+                            >
+                              <span className="truncate">{component}</span>
                             </span>
-                          ) : (
-                            <span className="text-slate-500">Produit non identifié</span>
-                          )}
-                        </div>
-                        <div>
-                          <p className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Composants</p>
-                          {components.length ? (
-                            <div className="flex flex-wrap gap-2">
-                              {components.map((component) => (
-                                <span
-                                  key={component}
-                                  className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700"
-                                >
-                                  {component}
-                                </span>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="text-slate-500">Aucun composant détecté</span>
-                          )}
-                        </div>
-                        <p className="text-xs text-slate-500">Source de classification : {sourceLabel}</p>
+                          ))
+                        ) : (
+                          <span className="text-xs text-slate-400">Aucun composant détecté</span>
+                        )}
                       </div>
+                      <button
+                        type="button"
+                        className="shrink-0 text-xs text-slate-400 hover:text-orange-600"
+                      >
+                        Corriger
+                      </button>
                     </div>
 
                     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <h3 className="text-base font-semibold text-slate-950">Réponse</h3>
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <h3 className="text-base font-semibold text-slate-950">Réponse</h3>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void composeAnswer()}
+                            disabled={!answerBlocks.length || isRegenerating || isComposingAnswer}
+                            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isComposingAnswer ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-4 w-4" />
+                            )}
+                            {isComposingAnswer ? "Recomposition..." : "Recomposer"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void previewPublicAnswer()}
+                            disabled={!answerBlocks.length || isRegenerating || isPreviewingPublicAnswer}
+                            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isPreviewingPublicAnswer ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Monitor className="h-4 w-4" />
+                            )}
+                            {isPreviewingPublicAnswer ? "Prévisualisation..." : "Prévisualiser"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsSharePanelOpen(true)}
+                            disabled={!answerBlocks.length || isRegenerating}
+                            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                          >
+                            <Send className="h-4 w-4" />
+                            Partager
+                          </button>
+                        </div>
+                      </div>
+                      {composeError ? (
+                        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                          {composeError}
+                        </div>
+                      ) : composeSuccess ? (
+                        <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                          Réponse recomposée.
+                        </div>
+                      ) : null}
+                      {previewError ? (
+                        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                          {previewError}
+                        </div>
+                      ) : null}
                       {currentQuestion.status === "NEEDS_PRODUCT" ? (
                         <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
                           L&apos;Atelier a besoin d&apos;un produit plus précis avant de produire une réponse fiable.
@@ -548,9 +1590,168 @@ export default function AtelierPage() {
                           La génération de réponse a échoué côté backend.
                         </div>
                       ) : null}
-                      <div className="mt-3 whitespace-pre-wrap rounded-lg border border-slate-100 bg-slate-50 p-4 text-sm leading-6 text-slate-800">
-                        {currentQuestion.answer_text || "Aucune réponse texte disponible pour cette question."}
-                      </div>
+                      {answerBlocks.length ? (
+                        <div className="mt-4 space-y-4">
+                          {answerBlocks.map((block) => {
+                            const blockSources = block.source_ids
+                              .map((id) => sourcesById.get(id))
+                              .filter((source): source is AtelierSource => Boolean(source));
+                            const blockVisuals = answerBlockVisualsByBlockId.get(block.block_id) || [];
+
+                            return (
+                              <article
+                                key={block.block_id}
+                                className="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                              >
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    {block.title ? (
+                                      <h4 className="text-sm font-semibold text-slate-950">{block.title}</h4>
+                                    ) : null}
+                                    {block.confidence ? (
+                                      <span className="mt-1 inline-flex rounded-full border border-slate-200 bg-white px-2 py-0.5 text-xs font-medium text-slate-500">
+                                        Confiance {block.confidence}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </div>
+
+                                {block.text ? (
+                                  <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800">
+                                    {block.text}
+                                  </p>
+                                ) : null}
+
+                                {blockVisuals.length ? (
+                                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                    {blockVisuals.map((ref, index) => {
+                                      const imageUrl = normalizeAssetUrl(ref.url);
+                                      if (!imageUrl) return null;
+
+                                      return (
+                                        <a
+                                          key={`${block.block_id}-${visualRefId(ref, index)}`}
+                                          href={imageUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="block overflow-hidden rounded-lg border border-slate-200 bg-white hover:border-orange-300"
+                                        >
+                                          <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 text-xs text-slate-500">
+                                            <span>{visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel")}</span>
+                                            {ref.page ? <span>Page {ref.page}</span> : null}
+                                          </div>
+                                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                                          <img
+                                            src={imageUrl}
+                                            alt={`Visuel réponse page ${ref.page || index + 1}`}
+                                            className="h-auto max-h-64 w-full object-contain"
+                                          />
+                                        </a>
+                                      );
+                                    })}
+                                  </div>
+                                ) : null}
+
+                                {blockSources.length ? (
+                                  <div className="mt-4 flex flex-wrap gap-2">
+                                    {blockSources.map((source, index) => {
+                                      const kind = source.anchor_kind
+                                        ? anchorKindLabel[source.anchor_kind] || source.anchor_kind
+                                        : source.result_type === "anchor"
+                                          ? "Repère"
+                                          : "Section";
+                                      const pages = pagesLabel(source.pages);
+
+                                      return (
+                                        <span
+                                          key={source.source_id || `${block.block_id}-source-${index}`}
+                                          className="inline-flex max-w-full rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600"
+                                        >
+                                          <span className="truncate">
+                                            {source.document_title || "Document"} · {kind}
+                                            {source.section_title ? ` · ${source.section_title}` : ""}
+                                            {source.anchor_title ? ` · ${source.anchor_title}` : ""}
+                                            {pages ? ` · ${pages}` : ""}
+                                          </span>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+                                ) : null}
+                              </article>
+                            );
+                          })}
+                          {supplementarySources.length || supplementaryVisualRefs.length ? (
+                            <section className="rounded-xl border border-dashed border-slate-200 bg-white p-4">
+                              <h4 className="text-sm font-semibold text-slate-800">Repères complémentaires</h4>
+                              <p className="mt-1 text-xs text-slate-500">
+                                Éléments conservés en contexte, sans être au cœur de la réponse principale.
+                              </p>
+
+                              {supplementaryVisualRefs.length ? (
+                                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                  {supplementaryVisualRefs.map((ref, index) => {
+                                    const imageUrl = normalizeAssetUrl(ref.url);
+                                    if (!imageUrl) return null;
+
+                                    return (
+                                      <a
+                                        key={`supplementary-${visualRefId(ref, index)}`}
+                                        href={imageUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="block overflow-hidden rounded-lg border border-slate-200 bg-slate-50 hover:border-orange-300"
+                                      >
+                                        <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 text-xs text-slate-500">
+                                          <span>{visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel")}</span>
+                                          {ref.page ? <span>Page {ref.page}</span> : null}
+                                        </div>
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img
+                                          src={imageUrl}
+                                          alt={`Repère complémentaire page ${ref.page || index + 1}`}
+                                          className="h-auto max-h-48 w-full object-contain"
+                                        />
+                                      </a>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+
+                              {supplementarySources.length ? (
+                                <div className="mt-4 flex flex-wrap gap-2">
+                                  {supplementarySources.map((source, index) => {
+                                    const kind = source.anchor_kind
+                                      ? anchorKindLabel[source.anchor_kind] || source.anchor_kind
+                                      : source.result_type === "anchor"
+                                        ? "Repère"
+                                        : "Section";
+                                    const pages = pagesLabel(source.pages);
+
+                                    return (
+                                      <span
+                                        key={source.source_id || `supplementary-source-${index}`}
+                                        className="inline-flex max-w-full rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-500"
+                                      >
+                                        <span className="truncate">
+                                          {source.document_title || "Document"} · {kind}
+                                          {source.section_title ? ` · ${source.section_title}` : ""}
+                                          {source.anchor_title ? ` · ${source.anchor_title}` : ""}
+                                          {pages ? ` · ${pages}` : ""}
+                                        </span>
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+                            </section>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                          Aucune réponse texte disponible pour cette question.
+                        </div>
+                      )}
                     </div>
 
                     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -619,14 +1820,30 @@ export default function AtelierPage() {
                     </div>
                   </div>
 
-                  <aside className="space-y-5">
-                    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <div className="mb-4 flex items-center gap-2">
-                        <ImageIcon className="h-4 w-4 text-slate-500" />
-                        <h3 className="text-base font-semibold text-slate-950">Extrait visuel pertinent</h3>
-                      </div>
-                      {visualRefs.length ? (
-                        <div className="space-y-3">
+                  <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+                    <button
+                      type="button"
+                      onClick={() => setIsVisualPanelOpen((value) => !value)}
+                      className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left hover:bg-slate-50"
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <ImageIcon className="h-4 w-4 shrink-0 text-slate-500" />
+                        <span className="text-base font-semibold text-slate-950">Extraits visuels</span>
+                        {visualRefs.length ? (
+                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500">
+                            {visualRefs.length} extrait{visualRefs.length > 1 ? "s" : ""}
+                          </span>
+                        ) : null}
+                      </span>
+                      {isVisualPanelOpen ? (
+                        <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" />
+                      ) : (
+                        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
+                      )}
+                    </button>
+                    {isVisualPanelOpen ? (
+                      visualRefs.length ? (
+                        <div className="grid gap-3 border-t border-slate-100 p-5 sm:grid-cols-2 xl:grid-cols-3">
                           {visualRefs.map((ref, index) => {
                             const imageUrl = normalizeAssetUrl(ref.url);
                             if (!imageUrl) return null;
@@ -637,29 +1854,29 @@ export default function AtelierPage() {
                                 href={imageUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="block overflow-hidden rounded-lg border border-slate-200 bg-white hover:border-orange-300"
+                                className="block overflow-hidden rounded-lg border border-slate-200 bg-slate-50 hover:border-orange-300"
                               >
-                                <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 text-xs text-slate-500">
-                                  <span>{ref.kind || "visual_ref"}</span>
+                                <div className="flex items-center justify-between border-b border-slate-100 bg-white px-3 py-2 text-xs text-slate-500">
+                                  <span>{visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel")}</span>
                                   {ref.page ? <span>Page {ref.page}</span> : null}
                                 </div>
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img
                                   src={imageUrl}
                                   alt={`Extrait visuel page ${ref.page || index + 1}`}
-                                  className="h-auto w-full object-contain"
+                                  className="h-auto max-h-72 w-full object-contain"
                                 />
                               </a>
                             );
                           })}
                         </div>
                       ) : (
-                        <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                        <p className="mx-5 mb-5 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
                           Aucun crop visuel disponible. La réponse et les sources restent consultables.
                         </p>
-                      )}
-                    </div>
-                  </aside>
+                      )
+                    ) : null}
+                  </div>
                 </section>
               </div>
             ) : (
@@ -672,6 +1889,15 @@ export default function AtelierPage() {
               </div>
             )}
           </section>
+
+          {currentQuestion && isSharePanelOpen ? (
+            <SharePanel
+              question={currentQuestion}
+              visualRefs={visualRefs}
+              onQuestionUpdated={applyQuestionUpdate}
+              onClose={() => setIsSharePanelOpen(false)}
+            />
+          ) : null}
 
           <aside className="w-80 shrink-0">
             <div className="sticky top-8 rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -688,6 +1914,21 @@ export default function AtelierPage() {
                       const itemComponents = item.components?.length
                         ? item.components
                         : item.detected_components || [];
+                      const shareSummary = item.share_summary;
+                      const isShared = Boolean(
+                        shareSummary?.has_been_shared ||
+                        shareSummary?.send_count ||
+                        shareSummary?.has_publication,
+                      );
+                      const shareChannel = shareSummary?.last_channel
+                        ? shareChannelLabel[shareSummary.last_channel] || shareSummary.last_channel
+                        : "";
+                      const rawShareStatus = shareSummary?.last_status || shareSummary?.last_send_status;
+                      const shareStatus = rawShareStatus
+                        ? shareStatusLabel[rawShareStatus] || rawShareStatus
+                        : "";
+                      const shareRecipient = shareRecipientLabel(shareSummary);
+                      const shareDate = shareSummaryDate(shareSummary);
 
                       return (
                         <button
@@ -730,6 +1971,30 @@ export default function AtelierPage() {
                               </span>
                             ) : null}
                           </div>
+                          {isShared ? (
+                            <div
+                              className={[
+                                "mt-2 rounded-lg border px-2.5 py-2 text-xs",
+                                shareSummary?.last_status === "FAILED"
+                                  || shareSummary?.last_send_status === "FAILED"
+                                  ? "border-red-200 bg-red-50 text-red-700"
+                                  : "border-emerald-200 bg-emerald-50 text-emerald-700",
+                              ].join(" ")}
+                            >
+                              <div className="flex flex-wrap items-center gap-1.5 font-medium">
+                                <span>{shareStatus || "Partagé"}</span>
+                                {shareChannel ? <span>· {shareChannel}</span> : null}
+                                {shareRecipient ? <span>· {shareRecipient}</span> : null}
+                              </div>
+                              {shareSummary?.last_error ? (
+                                <p className="mt-1 line-clamp-2 text-red-600">
+                                  {shareSummary.last_error}
+                                </p>
+                              ) : shareDate ? (
+                                <p className="mt-1 text-emerald-600">{shareDate}</p>
+                              ) : null}
+                            </div>
+                          ) : null}
                           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                             {item.created_at || item.updated_at ? (
                               <span className="inline-flex items-center gap-1">
