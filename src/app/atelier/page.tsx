@@ -4,17 +4,20 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
+  AlertTriangle,
   ChevronDown,
-  ChevronUp,
   Clock3,
+  Edit2,
   ExternalLink,
   FileText,
-  Image as ImageIcon,
   Loader2,
   Mail,
+  Maximize2,
   MessageSquare,
   Monitor,
+  PanelRightOpen,
   RefreshCw,
+  RotateCcw,
   Send,
   Sparkles,
   X,
@@ -83,6 +86,13 @@ type VisualRef = {
   height?: number | null;
   included?: boolean | null;
   local_path?: string | null;
+};
+
+type ExpandedVisual = {
+  imageUrl: string;
+  sourceUrl: string;
+  title: string;
+  meta: string;
 };
 
 type AtelierAnswerBlock = {
@@ -221,6 +231,23 @@ type AtelierShareSummary = {
   included_visual_count?: number | null;
 };
 
+type AtelierProduct = {
+  product_code: string;
+  product_label?: string | null;
+  indexed_document_count?: number | null;
+  indexed_document_ids?: string[] | null;
+  document_titles?: string[] | null;
+  last_indexed_at?: string | number | null;
+};
+
+type AtelierProductsResponse =
+  | AtelierProduct[]
+  | {
+      items?: AtelierProduct[];
+      data?: AtelierProduct[];
+      products?: AtelierProduct[];
+    };
+
 type AtelierQuestion = {
   question_id: string;
   status?: string | null;
@@ -246,6 +273,22 @@ type AtelierQuestion = {
     }> | null;
     confidence?: string | null;
     missing_information?: string[] | null;
+    available_products?: AtelierProduct[] | null;
+    retrieval?: {
+      error?: string | null;
+      searched_index_count?: number | null;
+      source_count?: number | null;
+      [key: string]: unknown;
+    } | null;
+    classification?: {
+      detected_product_supported?: boolean | null;
+      unsupported_detected_product?: string | null;
+      meta?: {
+        unsupported_detected_product_filtered?: string | null;
+        [key: string]: unknown;
+      } | null;
+      [key: string]: unknown;
+    } | null;
   } | null;
   created_at?: string | number | null;
   updated_at?: string | number | null;
@@ -415,14 +458,6 @@ function getPrimaryAnswerBlocks(question?: AtelierQuestion | null): RenderAnswer
   ];
 }
 
-function getSupplementarySources(question: AtelierQuestion | null | undefined, usedSourceIds: Set<string>) {
-  const sourcesById = buildSourcesById(question);
-  return (question?.draft?.supplementary_source_ids || [])
-    .filter((id) => !usedSourceIds.has(id))
-    .map((id) => sourcesById.get(id))
-    .filter((source): source is AtelierSource => Boolean(source));
-}
-
 function getSupplementaryVisualRefs(question: AtelierQuestion | null | undefined, usedVisualRefIds: Set<string>) {
   const visualRefsById = buildVisualRefsById(question);
   const seen = new Set<string>();
@@ -463,9 +498,34 @@ function apiErrorMessage(status: number, fallback?: string | null) {
   return `Erreur backend (${status}).`;
 }
 
-function pagesLabel(pages?: number[] | null) {
-  if (!pages?.length) return "Pages non précisées";
-  return `Page${pages.length > 1 ? "s" : ""} ${pages.join(", ")}`;
+function compactPagesLabel(pages?: number[] | null) {
+  if (!pages?.length) return "p. -";
+  return `p. ${pages.join(", ")}`;
+}
+
+function sourceKind(source: AtelierSource) {
+  if (source.anchor_kind) return anchorKindLabel[source.anchor_kind] || source.anchor_kind;
+  return source.result_type === "anchor" ? "Repère" : "Section";
+}
+
+function sourceCompactLabel(source: AtelierSource) {
+  return [
+    source.document_title || "Document produit",
+    source.section_title,
+    source.anchor_title,
+  ]
+    .filter(Boolean)
+    .join(" - ");
+}
+
+function visualCaption(ref: VisualRef) {
+  const kind = visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel");
+  return ref.page ? `${kind} - page ${ref.page}` : kind;
+}
+
+function expandedVisualTitle(ref: VisualRef, source?: AtelierSource | null) {
+  const sourceTitle = source?.document_title || "Extrait notice";
+  return ref.page ? `${sourceTitle} - page ${ref.page}` : sourceTitle;
 }
 
 function shareRecipientLabel(summary?: AtelierShareSummary | null) {
@@ -488,6 +548,12 @@ function questionListFromResponse(payload: QuestionsListResponse) {
   return payload.questions || payload.items || payload.data || [];
 }
 
+function productListFromResponse(payload: AtelierProductsResponse | null) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  return payload.items || payload.products || payload.data || [];
+}
+
 function questionFromResponse(payload: unknown): AtelierQuestion | null {
   if (!payload || typeof payload !== "object") return null;
 
@@ -506,6 +572,34 @@ function questionFromResponse(payload: unknown): AtelierQuestion | null {
   return null;
 }
 
+function productLabel(product: AtelierProduct) {
+  return safeStr(product.product_label || product.product_code);
+}
+
+function indexedNoticeLabel(count?: number | null) {
+  const value = count ?? 0;
+  return `${value} notice${value > 1 ? "s" : ""}`;
+}
+
+function unsupportedDetectedProduct(question?: AtelierQuestion | null) {
+  return (
+    safeStr(question?.meta?.classification?.unsupported_detected_product) ||
+    safeStr(question?.meta?.classification?.meta?.unsupported_detected_product_filtered) ||
+    safeStr(question?.detected_product)
+  );
+}
+
+function needsProductCorrection(question?: AtelierQuestion | null) {
+  if (!question) return false;
+  const retrievalError = safeStr(question.meta?.retrieval?.error);
+  return (
+    question.status === "NEEDS_PRODUCT" ||
+    !safeStr(question.product) ||
+    retrievalError === "product_not_indexed" ||
+    retrievalError === "product_required"
+  );
+}
+
 function StatusBadge({ status }: { status?: string | null }) {
   const value = status || "DRAFT";
   const tone =
@@ -521,6 +615,86 @@ function StatusBadge({ status }: { status?: string | null }) {
     <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${tone}`}>
       {statusLabel[value] || value}
     </span>
+  );
+}
+
+function AnswerNoticeVisualCard({
+  refData,
+  index,
+  source,
+  onExpand,
+  compact = false,
+}: {
+  refData: VisualRef;
+  index: number;
+  source?: AtelierSource | null;
+  onExpand: (visual: ExpandedVisual) => void;
+  compact?: boolean;
+}) {
+  const imageUrl = normalizeAssetUrl(refData.url);
+  if (!imageUrl) return null;
+
+  const sourceUrl = normalizeAssetUrl(source?.source_url) || imageUrl;
+  const title = source?.document_title || "Document produit";
+  const kind = visualKindLabel[safeStr(refData.kind)] || safeStr(refData.kind, "Visuel");
+  const expandedVisual = {
+    imageUrl,
+    sourceUrl,
+    title: expandedVisualTitle(refData, source),
+    meta: visualCaption(refData),
+  };
+
+  return (
+    <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <FileText className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+          <span className="truncate text-xs font-semibold text-slate-700">{title}</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {refData.page ? <span className="font-mono text-xs text-slate-400">p. {refData.page}</span> : null}
+          <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600">
+            {kind}
+          </span>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onExpand(expandedVisual)}
+        className={`block w-full bg-white text-left transition-colors hover:bg-orange-50/40 ${compact ? "p-3" : "p-4"}`}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={imageUrl}
+          alt={`Extrait visuel page ${refData.page || index + 1}`}
+          className={`w-full rounded border border-slate-100 object-contain ${compact ? "max-h-44" : "max-h-72"}`}
+        />
+      </button>
+
+      <div className="flex items-center justify-between gap-3 border-t border-slate-100 bg-slate-50 px-3 py-2">
+        <span className="min-w-0 truncate text-xs italic text-slate-500">{visualCaption(refData)}</span>
+        <div className="flex shrink-0 items-center gap-3">
+          <button
+            type="button"
+            onClick={() => onExpand(expandedVisual)}
+            className="inline-flex w-[72px] items-center justify-center gap-1 text-xs text-slate-400 transition-colors hover:text-orange-600"
+          >
+            <Maximize2 className="h-3 w-3" />
+            Agrandir
+          </button>
+          <a
+            href={sourceUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex w-[72px] items-center justify-center gap-1 text-xs text-slate-400 transition-colors hover:text-orange-600"
+          >
+            <ExternalLink className="h-3 w-3" />
+            Source
+          </a>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1074,6 +1248,15 @@ export default function AtelierPage() {
   const [isPreviewingPublicAnswer, setIsPreviewingPublicAnswer] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [isVisualPanelOpen, setIsVisualPanelOpen] = useState(false);
+  const [expandedVisual, setExpandedVisual] = useState<ExpandedVisual | null>(null);
+  const [isHistoryPanelOpen, setIsHistoryPanelOpen] = useState(false);
+  const [indexedProducts, setIndexedProducts] = useState<AtelierProduct[]>([]);
+  const [isLoadingProducts, setIsLoadingProducts] = useState(false);
+  const [productsError, setProductsError] = useState<string | null>(null);
+  const [selectedCorrectionProduct, setSelectedCorrectionProduct] = useState("");
+  const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
+  const [manualCorrectedProduct, setManualCorrectedProduct] = useState<string | null>(null);
+  const [isProductCorrectionOpen, setIsProductCorrectionOpen] = useState(false);
 
   const visualRefs = useMemo(
     () => selectVisualRefs(currentQuestion?.visual_refs),
@@ -1086,7 +1269,7 @@ export default function AtelierPage() {
       const res = await fetch(buildUrl("/atelier/questions"), { cache: "no-store" });
       if (!res.ok) throw new Error(`Historique indisponible (${res.status})`);
       const payload = (await res.json()) as QuestionsListResponse;
-      setHistory(questionListFromResponse(payload).slice(0, 8));
+      setHistory(questionListFromResponse(payload));
     } catch (err) {
       console.warn(err);
     } finally {
@@ -1094,9 +1277,56 @@ export default function AtelierPage() {
     }
   };
 
+  const loadIndexedProducts = async () => {
+    setIsLoadingProducts(true);
+    setProductsError(null);
+
+    try {
+      const res = await fetch(buildUrl("/atelier/products"), { cache: "no-store" });
+      const payload = (await res.json().catch(() => null)) as AtelierProductsResponse | null;
+      if (!res.ok) throw new Error(apiErrorMessage(res.status));
+      setIndexedProducts(productListFromResponse(payload).filter((product) => safeStr(product.product_code)));
+    } catch (err) {
+      setIndexedProducts([]);
+      setProductsError(err instanceof Error ? err.message : "Produits indexés indisponibles.");
+    } finally {
+      setIsLoadingProducts(false);
+    }
+  };
+
   useEffect(() => {
     void loadHistory();
+    void loadIndexedProducts();
   }, []);
+
+  useEffect(() => {
+    if (!expandedVisual) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpandedVisual(null);
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [expandedVisual]);
+
+  const startNewQuestion = () => {
+    setCurrentQuestion(null);
+    setQuestionText("");
+    setEditedQuestionText("");
+    setIsEditingQuestion(false);
+    setIsSharePanelOpen(false);
+    setIsVisualPanelOpen(false);
+    setExpandedVisual(null);
+    setError(null);
+    setComposeError(null);
+    setComposeSuccess(false);
+    setPreviewError(null);
+    setSelectedCorrectionProduct("");
+    setIsProductDropdownOpen(false);
+    setManualCorrectedProduct(null);
+    setIsProductCorrectionOpen(false);
+  };
 
   const submitQuestion = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1110,7 +1340,12 @@ export default function AtelierPage() {
       const res = await fetch(buildUrl("/atelier/questions"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: trimmed, retrieval_limit: 4 }),
+        body: JSON.stringify({
+          question: trimmed,
+          product: null,
+          components: [],
+          retrieval_limit: 8,
+        }),
       });
 
       const payload = await res.json().catch(() => null);
@@ -1124,6 +1359,9 @@ export default function AtelierPage() {
       setCurrentQuestion(createdQuestion);
       setEditedQuestionText(createdQuestion.question || "");
       setIsEditingQuestion(false);
+      setSelectedCorrectionProduct("");
+      setManualCorrectedProduct(null);
+      setIsProductCorrectionOpen(false);
       setQuestionText("");
       void loadHistory();
     } catch (err) {
@@ -1138,6 +1376,10 @@ export default function AtelierPage() {
       setCurrentQuestion(optimisticQuestion);
       setEditedQuestionText(optimisticQuestion.question || "");
       setIsEditingQuestion(false);
+      setSelectedCorrectionProduct("");
+      setIsProductDropdownOpen(false);
+      setIsProductCorrectionOpen(false);
+      setManualCorrectedProduct(null);
     }
     setIsLoadingDetail(true);
     setError(null);
@@ -1153,6 +1395,10 @@ export default function AtelierPage() {
       setCurrentQuestion(detailQuestion);
       setEditedQuestionText(detailQuestion.question || "");
       setIsEditingQuestion(false);
+      setSelectedCorrectionProduct("");
+      setIsProductDropdownOpen(false);
+      setIsProductCorrectionOpen(false);
+      setManualCorrectedProduct(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Impossible de charger la question.");
     } finally {
@@ -1195,7 +1441,7 @@ export default function AtelierPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             question: trimmed,
-            retrieval_limit: 4,
+            retrieval_limit: 8,
           }),
         },
       );
@@ -1211,6 +1457,52 @@ export default function AtelierPage() {
       applyQuestionUpdate(regeneratedQuestion);
       setEditedQuestionText(regeneratedQuestion.question || "");
       setIsEditingQuestion(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur inconnue pendant la régénération.");
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  const regenerateWithCorrectedProduct = async () => {
+    if (!currentQuestion?.question_id || !selectedCorrectionProduct || isRegenerating) return;
+
+    const question = safeStr(currentQuestion.question);
+    if (!question) return;
+
+    setIsRegenerating(true);
+    setError(null);
+    setSelectedCorrectionProduct(selectedCorrectionProduct);
+
+    try {
+      const res = await fetch(
+        buildUrl(`/atelier/questions/${encodeURIComponent(currentQuestion.question_id)}/regenerate`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question,
+            product: selectedCorrectionProduct,
+            components,
+            retrieval_limit: 8,
+          }),
+        },
+      );
+
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.ok) {
+        throw new Error(payload?.detail || payload?.message || `Régénération impossible (${res.status})`);
+      }
+
+      const regeneratedQuestion = questionFromResponse(payload);
+      if (!regeneratedQuestion) throw new Error("Réponse Atelier invalide : question absente.");
+
+      applyQuestionUpdate(regeneratedQuestion);
+      setManualCorrectedProduct(selectedCorrectionProduct);
+      setEditedQuestionText(regeneratedQuestion.question || "");
+      setIsEditingQuestion(false);
+      setIsProductDropdownOpen(false);
+      setIsProductCorrectionOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue pendant la régénération.");
     } finally {
@@ -1301,6 +1593,22 @@ export default function AtelierPage() {
     currentQuestion?.components?.length
       ? currentQuestion.components
       : currentQuestion?.detected_components || [];
+  const availableCorrectionProducts = currentQuestion?.meta?.available_products?.length
+    ? currentQuestion.meta.available_products
+    : indexedProducts;
+  const requiresProductCorrection = needsProductCorrection(currentQuestion);
+  const showProductCorrection = requiresProductCorrection || isProductCorrectionOpen;
+  const unsupportedProduct = unsupportedDetectedProduct(currentQuestion);
+  const selectedCorrectionProductLabel =
+    availableCorrectionProducts.find((item) => item.product_code === selectedCorrectionProduct)?.product_label ||
+    availableCorrectionProducts.find((item) => item.product_code === selectedCorrectionProduct)?.product_code ||
+    "";
+  const correctedProductLabel =
+    availableCorrectionProducts.find((item) => item.product_code === manualCorrectedProduct)?.product_label ||
+    availableCorrectionProducts.find((item) => item.product_code === manualCorrectedProduct)?.product_code ||
+    currentQuestion?.product ||
+    "";
+  const isManualProduct = Boolean(manualCorrectedProduct) || currentQuestion?.classification_source === "manual_review";
   const revisionCount = currentQuestion?.meta?.revision_count || 0;
   const answerBlocks = useMemo(
     () => getPrimaryAnswerBlocks(currentQuestion),
@@ -1314,17 +1622,9 @@ export default function AtelierPage() {
     () => buildVisualRefsById(currentQuestion),
     [currentQuestion],
   );
-  const usedAnswerSourceIds = useMemo(
-    () => new Set(answerBlocks.flatMap((block) => block.source_ids)),
-    [answerBlocks],
-  );
   const usedAnswerVisualRefIds = useMemo(
     () => new Set(answerBlocks.flatMap((block) => block.visual_ref_ids)),
     [answerBlocks],
-  );
-  const supplementarySources = useMemo(
-    () => getSupplementarySources(currentQuestion, usedAnswerSourceIds),
-    [currentQuestion, usedAnswerSourceIds],
   );
   const supplementaryVisualRefs = useMemo(
     () => dedupeVisualRefs(getSupplementaryVisualRefs(currentQuestion, usedAnswerVisualRefIds)),
@@ -1350,37 +1650,97 @@ export default function AtelierPage() {
 
     return map;
   }, [answerBlocks, visualRefsById]);
+  const responseVisualRefs = useMemo(
+    () =>
+      dedupeVisualRefs([...Array.from(answerBlockVisualsByBlockId.values()).flat(), ...supplementaryVisualRefs])
+        .filter((ref) => normalizeAssetUrl(ref.url)),
+    [answerBlockVisualsByBlockId, supplementaryVisualRefs],
+  );
+  const responseVisualSourcesByKey = useMemo(() => {
+    const map = new Map<string, AtelierSource>();
+
+    answerBlocks.forEach((block) => {
+      const firstSource = block.source_ids
+        .map((id) => sourcesById.get(id))
+        .find((source): source is AtelierSource => Boolean(source));
+      if (!firstSource) return;
+
+      (answerBlockVisualsByBlockId.get(block.block_id) || []).forEach((ref) => {
+        map.set(visualRefDedupeKey(ref), firstSource);
+      });
+    });
+
+    return map;
+  }, [answerBlocks, answerBlockVisualsByBlockId, sourcesById]);
 
   return (
     <AppShell>
       <main className="min-h-screen bg-slate-50">
-        <div className="mx-auto flex max-w-7xl gap-6 px-8 py-8">
-          <section className="min-w-0 flex-1 space-y-6">
+        <div className="mx-auto max-w-4xl px-8 py-8">
+          <section className="min-w-0 space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-orange-200 bg-orange-50 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-orange-700">
                   <Sparkles className="h-3.5 w-3.5" />
                   Atelier PRIA
                 </div>
-                <h1 className="text-3xl font-semibold text-slate-950">Demander à l&apos;Atelier</h1>
-                <p className="mt-2 max-w-2xl text-sm text-slate-600">
+                <h1 className="text-2xl font-semibold text-slate-950">Demander à l&apos;Atelier</h1>
+                <p className="mt-1 max-w-2xl text-sm text-slate-500">
                   Posez une question technique libre. L&apos;Atelier répond avec les sources documentaires produit et les extraits visuels disponibles.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => void loadHistory()}
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50"
-              >
-                <RefreshCw className={`h-4 w-4 ${isLoadingHistory ? "animate-spin" : ""}`} />
-                Actualiser
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                {currentQuestion ? (
+                  <button
+                    type="button"
+                    onClick={startNewQuestion}
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    Nouvelle question
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsHistoryPanelOpen(true);
+                    void loadHistory();
+                  }}
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+                >
+                  <PanelRightOpen className="h-4 w-4" />
+                  Historique
+                  {history.length ? (
+                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-bold text-slate-600">
+                      {history.length}
+                    </span>
+                  ) : null}
+                </button>
+              </div>
             </div>
 
-            <form onSubmit={submitQuestion} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            {!currentQuestion ? (
+            <form onSubmit={submitQuestion} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
               <label htmlFor="atelier-question" className="text-sm font-semibold text-slate-900">
-                Posez une question à l&apos;Atelier
+                Posez une question technique
               </label>
+              <div className="mb-3 mt-3 flex flex-wrap gap-2">
+                {[
+                  "Comment raccorder le transmetteur de pression sur une PAC hybride ?",
+                  "Code défaut PAC hybride",
+                  "Procédure purge OptiPellet",
+                  "Raccordement bus RC7",
+                ].map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    onClick={() => setQuestionText(suggestion)}
+                    className="rounded-full border border-slate-200 px-3 py-1.5 text-xs text-slate-600 hover:border-orange-300 hover:bg-orange-50 hover:text-orange-700"
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
               <div className="mt-3 flex gap-3">
                 <textarea
                   id="atelier-question"
@@ -1394,15 +1754,15 @@ export default function AtelierPage() {
                   }}
                   placeholder="Comment raccorder le transmetteur de pression sur une PAC hybride ?"
                   rows={3}
-                  className="min-h-24 flex-1 resize-y rounded-lg border border-slate-200 px-3 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+                  className="min-h-24 flex-1 resize-y rounded-lg border border-slate-200 px-3.5 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
                 />
                 <button
                   type="submit"
                   disabled={!questionText.trim() || isSubmitting}
-                  className="inline-flex h-11 items-center gap-2 rounded-lg bg-orange-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  className="inline-flex h-11 items-center gap-2 rounded-lg bg-orange-600 px-5 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
                   {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                  Envoyer
+                  Interroger
                 </button>
               </div>
               {error ? (
@@ -1412,6 +1772,7 @@ export default function AtelierPage() {
                 </div>
               ) : null}
             </form>
+            ) : null}
 
             {currentQuestion ? (
               <div className="space-y-5">
@@ -1490,41 +1851,224 @@ export default function AtelierPage() {
 
                 <section className="space-y-5">
                   <div className="space-y-5">
-                    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3 shadow-sm">
-                      <span className="shrink-0 text-xs font-bold uppercase tracking-wide text-slate-400">
-                        Détection auto.
-                      </span>
-                      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
-                        {product ? (
-                          <span className="inline-flex max-w-full rounded-full border border-orange-200 bg-orange-50 px-2.5 py-1 text-xs font-bold text-orange-700">
-                            <span className="truncate">{product}</span>
-                          </span>
-                        ) : (
-                          <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
-                            Produit non identifié
-                          </span>
-                        )}
-                        {components.length ? (
-                          components.map((component) => (
-                            <span
-                              key={component}
-                              className="inline-flex max-w-full rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600"
-                            >
-                              <span className="truncate">{component}</span>
-                            </span>
-                          ))
-                        ) : (
-                          <span className="text-xs text-slate-400">Aucun composant détecté</span>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        className="shrink-0 text-xs text-slate-400 hover:text-orange-600"
-                      >
-                        Corriger
-                      </button>
-                    </div>
+                    {showProductCorrection ? (
+                      <div className="overflow-visible rounded-xl border border-amber-300 bg-white shadow-sm">
+                        <div className="flex items-start gap-3 border-b border-amber-200 bg-amber-50 px-5 py-4">
+                          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold text-amber-900">
+                              {unsupportedProduct ? "Produit détecté sans notice indexée" : "Produit à préciser"}
+                            </p>
+                            <p className="mt-0.5 text-xs leading-relaxed text-amber-700">
+                              {unsupportedProduct
+                                ? `« ${unsupportedProduct} » a été détecté automatiquement mais aucune documentation n'est disponible pour ce produit. La recherche n'a retourné aucune source et la réponse ne peut pas être générée.`
+                                : "Aucune documentation indexée n'a permis d'identifier un produit principal exploitable. Sélectionnez un produit couvert avant de relancer la recherche."}
+                            </p>
+                          </div>
+                          {unsupportedProduct ? (
+                            <div className="flex shrink-0 items-center gap-2">
+                              <span className="rounded-full border border-amber-300 bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800 line-through opacity-60">
+                                {unsupportedProduct}
+                              </span>
+                              <span className="text-xs font-medium text-amber-500">non indexé</span>
+                            </div>
+                          ) : null}
+                        </div>
 
+                        <div className="space-y-4 px-5 py-4">
+                          <div>
+                            <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Sélectionner le produit principal
+                            </label>
+                            <div className="relative">
+                              <button
+                                type="button"
+                                onClick={() => setIsProductDropdownOpen((value) => !value)}
+                                disabled={Boolean(productsError) || isLoadingProducts || !availableCorrectionProducts.length}
+                                className={[
+                                  "flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-left text-sm transition",
+                                  selectedCorrectionProduct
+                                    ? "border-orange-400 bg-orange-50 font-medium text-orange-800"
+                                    : "border-slate-200 bg-white text-slate-400 hover:border-slate-300",
+                                  productsError || isLoadingProducts || !availableCorrectionProducts.length
+                                    ? "cursor-not-allowed opacity-60"
+                                    : "",
+                                ].join(" ")}
+                              >
+                                <span className="truncate">
+                                  {selectedCorrectionProductLabel || "— Choisir un produit avec notices indexées"}
+                                </span>
+                                {isLoadingProducts ? (
+                                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />
+                                ) : (
+                                  <ChevronDown
+                                    className={[
+                                      "h-4 w-4 shrink-0 transition-transform duration-150",
+                                      isProductDropdownOpen ? "rotate-180" : "",
+                                      selectedCorrectionProduct ? "text-orange-500" : "text-slate-400",
+                                    ].join(" ")}
+                                  />
+                                )}
+                              </button>
+
+                              {isProductDropdownOpen && !productsError && availableCorrectionProducts.length ? (
+                                <>
+                                  <div className="fixed inset-0 z-10" onClick={() => setIsProductDropdownOpen(false)} />
+                                  <div className="absolute left-0 right-0 top-full z-30 mt-1.5 max-h-80 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+                                    <div className="border-b border-slate-100 bg-slate-50 px-3 py-2">
+                                      <p className="text-xs text-slate-500">
+                                        {availableCorrectionProducts.length} produit{availableCorrectionProducts.length > 1 ? "s" : ""} avec notices indexées
+                                      </p>
+                                    </div>
+                                    {availableCorrectionProducts.map((item) => (
+                                      <button
+                                        key={item.product_code}
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedCorrectionProduct(item.product_code);
+                                          setIsProductDropdownOpen(false);
+                                        }}
+                                        className={[
+                                          "flex w-full items-center justify-between gap-3 border-b border-slate-50 px-4 py-2.5 text-left text-sm transition last:border-0 hover:bg-orange-50",
+                                          selectedCorrectionProduct === item.product_code
+                                            ? "bg-orange-50 font-semibold text-orange-800"
+                                            : "text-slate-700",
+                                        ].join(" ")}
+                                      >
+                                        <span className="truncate">{productLabel(item)}</span>
+                                        <span className="flex shrink-0 items-center gap-1.5">
+                                          <span className="text-xs font-medium text-emerald-600">
+                                            {indexedNoticeLabel(item.indexed_document_count)}
+                                          </span>
+                                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                        </span>
+                                      </button>
+                                    ))}
+                                    {unsupportedProduct ? (
+                                      <div className="border-t border-slate-100 bg-slate-50 px-4 py-2.5">
+                                        <p className="text-xs text-slate-400">
+                                          « {unsupportedProduct} » — <span className="text-amber-600">aucune notice indexée</span>
+                                        </p>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </>
+                              ) : null}
+                            </div>
+                            {productsError ? (
+                              <p className="mt-2 text-xs text-red-600">
+                                Produits indexés indisponibles. La correction produit est désactivée.
+                              </p>
+                            ) : null}
+                          </div>
+
+                          {components.length ? (
+                            <div>
+                              <p className="mb-1.5 text-xs text-slate-500">
+                                Composants conservés de la détection automatique :
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {components.map((component) => (
+                                  <span key={component} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                                    {component}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+
+                          <div className="flex items-center justify-end pt-1">
+                            <button
+                              type="button"
+                              onClick={() => void regenerateWithCorrectedProduct()}
+                              disabled={!selectedCorrectionProduct || isRegenerating || Boolean(productsError)}
+                              className="inline-flex items-center gap-2 rounded-xl bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {isRegenerating ? (
+                                <>
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                  Régénération...
+                                </>
+                              ) : (
+                                <>
+                                  <RotateCcw className="h-4 w-4" />
+                                  Régénérer la réponse
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3 shadow-sm">
+                        <span
+                          className={[
+                            "shrink-0 text-xs font-bold uppercase tracking-wide",
+                            isManualProduct ? "text-orange-500" : "text-slate-400",
+                          ].join(" ")}
+                        >
+                          {isManualProduct ? "Produit corrigé" : "Détection auto."}
+                        </span>
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                          {product || correctedProductLabel ? (
+                            <span className="inline-flex max-w-full rounded-full border border-orange-200 bg-orange-50 px-2.5 py-1 text-xs font-bold text-orange-700">
+                              <span className="truncate">{correctedProductLabel || product}</span>
+                            </span>
+                          ) : null}
+                          {components.length ? (
+                            components.map((component) => (
+                              <span
+                                key={component}
+                                className="inline-flex max-w-full rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600"
+                              >
+                                <span className="truncate">{component}</span>
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-xs text-slate-400">Aucun composant détecté</span>
+                          )}
+                          {isManualProduct ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
+                              <Edit2 className="h-2.5 w-2.5" />
+                              Manuel
+                            </span>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedCorrectionProduct(currentQuestion?.product || "");
+                            setIsProductCorrectionOpen(true);
+                          }}
+                          className="shrink-0 text-xs text-slate-400 hover:text-orange-600"
+                        >
+                          {isManualProduct ? "Modifier" : "Corriger"}
+                        </button>
+                      </div>
+                    )}
+
+                    {showProductCorrection ? (
+                      <div className="flex flex-col items-center rounded-xl border border-slate-200 bg-white px-8 py-10 text-center shadow-sm">
+                        <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100">
+                          <AlertCircle className="h-5 w-5 text-slate-400" />
+                        </div>
+                        <p className="mb-1 font-semibold text-slate-800">Réponse indisponible</p>
+                        <p className="max-w-xs text-sm leading-relaxed text-slate-500">
+                          Aucune notice n&apos;a été trouvée pour le produit détecté. Sélectionnez un produit indexé dans la section ci-dessus et régénérez la réponse.
+                        </p>
+                        <div className="mt-5 flex items-center gap-3 text-xs text-slate-400">
+                          <span className="flex items-center gap-1.5">
+                            <FileText className="h-3.5 w-3.5" />
+                            0 source trouvée
+                          </span>
+                          <span className="h-1 w-1 rounded-full bg-slate-300" />
+                          <span className="flex items-center gap-1.5">
+                            <Sparkles className="h-3.5 w-3.5" />
+                            Génération non lancée
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
                     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <h3 className="text-base font-semibold text-slate-950">Réponse</h3>
@@ -1591,291 +2135,170 @@ export default function AtelierPage() {
                         </div>
                       ) : null}
                       {answerBlocks.length ? (
-                        <div className="mt-4 space-y-4">
-                          {answerBlocks.map((block) => {
-                            const blockSources = block.source_ids
-                              .map((id) => sourcesById.get(id))
-                              .filter((source): source is AtelierSource => Boolean(source));
-                            const blockVisuals = answerBlockVisualsByBlockId.get(block.block_id) || [];
+                        <>
+                          <div className="mt-4 divide-y divide-slate-100">
+                            {answerBlocks.map((block) => {
+                              const blockSources = block.source_ids
+                                .map((id) => sourcesById.get(id))
+                                .filter((source): source is AtelierSource => Boolean(source));
+                              const blockVisuals = answerBlockVisualsByBlockId.get(block.block_id) || [];
+                              const primaryVisual = blockVisuals[0];
+                              const primarySource = blockSources[0] || null;
 
-                            return (
-                              <article
-                                key={block.block_id}
-                                className="rounded-xl border border-slate-200 bg-slate-50 p-4"
-                              >
-                                <div className="flex flex-wrap items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    {block.title ? (
-                                      <h4 className="text-sm font-semibold text-slate-950">{block.title}</h4>
-                                    ) : null}
-                                    {block.confidence ? (
-                                      <span className="mt-1 inline-flex rounded-full border border-slate-200 bg-white px-2 py-0.5 text-xs font-medium text-slate-500">
-                                        Confiance {block.confidence}
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                </div>
-
-                                {block.text ? (
-                                  <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800">
-                                    {block.text}
-                                  </p>
-                                ) : null}
-
-                                {blockVisuals.length ? (
-                                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                                    {blockVisuals.map((ref, index) => {
-                                      const imageUrl = normalizeAssetUrl(ref.url);
-                                      if (!imageUrl) return null;
-
-                                      return (
-                                        <a
-                                          key={`${block.block_id}-${visualRefId(ref, index)}`}
-                                          href={imageUrl}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="block overflow-hidden rounded-lg border border-slate-200 bg-white hover:border-orange-300"
-                                        >
-                                          <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 text-xs text-slate-500">
-                                            <span>{visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel")}</span>
-                                            {ref.page ? <span>Page {ref.page}</span> : null}
-                                          </div>
-                                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                                          <img
-                                            src={imageUrl}
-                                            alt={`Visuel réponse page ${ref.page || index + 1}`}
-                                            className="h-auto max-h-64 w-full object-contain"
-                                          />
-                                        </a>
-                                      );
-                                    })}
-                                  </div>
-                                ) : null}
-
-                                {blockSources.length ? (
-                                  <div className="mt-4 flex flex-wrap gap-2">
-                                    {blockSources.map((source, index) => {
-                                      const kind = source.anchor_kind
-                                        ? anchorKindLabel[source.anchor_kind] || source.anchor_kind
-                                        : source.result_type === "anchor"
-                                          ? "Repère"
-                                          : "Section";
-                                      const pages = pagesLabel(source.pages);
-
-                                      return (
-                                        <span
-                                          key={source.source_id || `${block.block_id}-source-${index}`}
-                                          className="inline-flex max-w-full rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600"
-                                        >
-                                          <span className="truncate">
-                                            {source.document_title || "Document"} · {kind}
-                                            {source.section_title ? ` · ${source.section_title}` : ""}
-                                            {source.anchor_title ? ` · ${source.anchor_title}` : ""}
-                                            {pages ? ` · ${pages}` : ""}
-                                          </span>
-                                        </span>
-                                      );
-                                    })}
-                                  </div>
-                                ) : null}
-                              </article>
-                            );
-                          })}
-                          {supplementarySources.length || supplementaryVisualRefs.length ? (
-                            <section className="rounded-xl border border-dashed border-slate-200 bg-white p-4">
-                              <h4 className="text-sm font-semibold text-slate-800">Repères complémentaires</h4>
-                              <p className="mt-1 text-xs text-slate-500">
-                                Éléments conservés en contexte, sans être au cœur de la réponse principale.
-                              </p>
-
-                              {supplementaryVisualRefs.length ? (
-                                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                                  {supplementaryVisualRefs.map((ref, index) => {
-                                    const imageUrl = normalizeAssetUrl(ref.url);
-                                    if (!imageUrl) return null;
-
-                                    return (
-                                      <a
-                                        key={`supplementary-${visualRefId(ref, index)}`}
-                                        href={imageUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="block overflow-hidden rounded-lg border border-slate-200 bg-slate-50 hover:border-orange-300"
-                                      >
-                                        <div className="flex items-center justify-between border-b border-slate-100 px-3 py-2 text-xs text-slate-500">
-                                          <span>{visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel")}</span>
-                                          {ref.page ? <span>Page {ref.page}</span> : null}
+                              return (
+                                <article key={block.block_id} className="py-5 first:pt-0 last:pb-0">
+                                  <div
+                                    className={[
+                                      "grid gap-5",
+                                      primaryVisual ? "lg:grid-cols-[minmax(0,1fr)_280px]" : "",
+                                    ].join(" ")}
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="flex flex-wrap items-start justify-between gap-3">
+                                        <div className="min-w-0">
+                                          {block.title ? (
+                                            <h4 className="text-sm font-semibold text-slate-950">{block.title}</h4>
+                                          ) : null}
+                                          {block.confidence ? (
+                                            <span className="mt-1 inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-500">
+                                              Confiance {block.confidence}
+                                            </span>
+                                          ) : null}
                                         </div>
-                                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                                        <img
-                                          src={imageUrl}
-                                          alt={`Repère complémentaire page ${ref.page || index + 1}`}
-                                          className="h-auto max-h-48 w-full object-contain"
-                                        />
-                                      </a>
-                                    );
-                                  })}
+                                      </div>
+
+                                      {block.text ? (
+                                        <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800">
+                                          {block.text}
+                                        </p>
+                                      ) : null}
+
+                                      {blockSources.length ? (
+                                        <div className="mt-4 flex flex-wrap gap-2">
+                                          {blockSources.map((source, index) => (
+                                            <span
+                                              key={source.source_id || `${block.block_id}-source-${index}`}
+                                              className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-600"
+                                            >
+                                              <FileText className="h-3 w-3 shrink-0 text-slate-400" />
+                                              <span className="truncate">
+                                                {sourceKind(source)} - {sourceCompactLabel(source)}
+                                              </span>
+                                              <span className="shrink-0 font-mono text-slate-400">
+                                                {compactPagesLabel(source.pages)}
+                                              </span>
+                                            </span>
+                                          ))}
+                                        </div>
+                                      ) : null}
+                                    </div>
+
+                                    {primaryVisual ? (
+                                      <AnswerNoticeVisualCard
+                                        refData={primaryVisual}
+                                        index={0}
+                                        source={primarySource}
+                                        onExpand={setExpandedVisual}
+                                        compact
+                                      />
+                                    ) : null}
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </div>
+
+                          {responseVisualRefs.length ? (
+                            <div className="mt-5 border-t border-slate-200">
+                              <button
+                                type="button"
+                                onClick={() => setIsVisualPanelOpen((value) => !value)}
+                                className="group flex w-full items-center justify-between px-1 py-3 text-left transition-colors hover:bg-slate-50"
+                              >
+                                <span className="flex items-center gap-2">
+                                  <Maximize2 className="h-3.5 w-3.5 text-slate-400 transition-colors group-hover:text-slate-600" />
+                                  <span className="text-xs font-medium text-slate-500 transition-colors group-hover:text-slate-700">
+                                    {responseVisualRefs.length} extrait{responseVisualRefs.length > 1 ? "s" : ""} visuel{responseVisualRefs.length > 1 ? "s" : ""} utilisé{responseVisualRefs.length > 1 ? "s" : ""} dans cette réponse
+                                  </span>
+                                </span>
+                                <ChevronDown
+                                  className={[
+                                    "h-3.5 w-3.5 text-slate-400 transition-transform duration-200",
+                                    isVisualPanelOpen ? "rotate-180" : "",
+                                  ].join(" ")}
+                                />
+                              </button>
+
+                              {isVisualPanelOpen ? (
+                                <div className="grid gap-3 pb-5 sm:grid-cols-2">
+                                  {responseVisualRefs.map((ref, index) => (
+                                    <AnswerNoticeVisualCard
+                                      key={`response-visual-${visualRefId(ref, index)}`}
+                                      refData={ref}
+                                      index={index}
+                                      source={responseVisualSourcesByKey.get(visualRefDedupeKey(ref)) || currentQuestion.sources?.[0] || null}
+                                      onExpand={setExpandedVisual}
+                                      compact
+                                    />
+                                  ))}
                                 </div>
                               ) : null}
-
-                              {supplementarySources.length ? (
-                                <div className="mt-4 flex flex-wrap gap-2">
-                                  {supplementarySources.map((source, index) => {
-                                    const kind = source.anchor_kind
-                                      ? anchorKindLabel[source.anchor_kind] || source.anchor_kind
-                                      : source.result_type === "anchor"
-                                        ? "Repère"
-                                        : "Section";
-                                    const pages = pagesLabel(source.pages);
-
-                                    return (
-                                      <span
-                                        key={source.source_id || `supplementary-source-${index}`}
-                                        className="inline-flex max-w-full rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-500"
-                                      >
-                                        <span className="truncate">
-                                          {source.document_title || "Document"} · {kind}
-                                          {source.section_title ? ` · ${source.section_title}` : ""}
-                                          {source.anchor_title ? ` · ${source.anchor_title}` : ""}
-                                          {pages ? ` · ${pages}` : ""}
-                                        </span>
-                                      </span>
-                                    );
-                                  })}
-                                </div>
-                              ) : null}
-                            </section>
+                            </div>
                           ) : null}
-                        </div>
+
+                          <div className="-mx-5 -mb-5 mt-5 border-t border-slate-200 bg-slate-50 px-5 py-4">
+                            <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">
+                              Sources documentaires
+                            </p>
+                            {currentQuestion.sources?.length ? (
+                              <div className="flex flex-wrap gap-2">
+                                {currentQuestion.sources.map((source, index) => {
+                                  const sourceUrl = normalizeAssetUrl(source.source_url);
+                                  const content = (
+                                    <>
+                                      <FileText className="h-3 w-3 shrink-0 text-slate-400" />
+                                      <span className="truncate">{sourceCompactLabel(source)}</span>
+                                      <span className="shrink-0 font-mono text-slate-400">
+                                        {compactPagesLabel(source.pages)}
+                                      </span>
+                                      {sourceUrl ? <ExternalLink className="ml-1 h-3 w-3 shrink-0 text-slate-300" /> : null}
+                                    </>
+                                  );
+                                  const className =
+                                    "inline-flex max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600 transition-colors hover:border-orange-300";
+
+                                  return sourceUrl ? (
+                                    <a
+                                      key={source.source_id || `${source.document_id}-${index}`}
+                                      href={sourceUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className={className}
+                                    >
+                                      {content}
+                                    </a>
+                                  ) : (
+                                    <span
+                                      key={source.source_id || `${source.document_id}-${index}`}
+                                      className={className}
+                                    >
+                                      {content}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <p className="text-sm text-slate-500">Aucune source documentaire disponible.</p>
+                            )}
+                          </div>
+                        </>
                       ) : (
                         <div className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
                           Aucune réponse texte disponible pour cette question.
                         </div>
                       )}
                     </div>
-
-                    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                      <div className="mb-4 flex items-center gap-2">
-                        <FileText className="h-4 w-4 text-slate-500" />
-                        <h3 className="text-base font-semibold text-slate-950">Sources</h3>
-                      </div>
-                      {currentQuestion.sources?.length ? (
-                        <div className="space-y-3">
-                          {currentQuestion.sources.map((source, index) => {
-                            const sourceUrl = normalizeAssetUrl(source.source_url);
-                            const kind = source.anchor_kind
-                              ? anchorKindLabel[source.anchor_kind] || source.anchor_kind
-                              : null;
-
-                            return (
-                              <article
-                                key={source.source_id || `${source.document_id}-${index}`}
-                                className="rounded-lg border border-slate-200 p-4"
-                              >
-                                <div className="flex flex-wrap items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <p className="font-semibold text-slate-950">
-                                      {source.document_title || "Document produit"}
-                                    </p>
-                                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                      <span>{source.result_type === "anchor" ? "Repère" : "Section"}</span>
-                                      {kind ? (
-                                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-slate-600">
-                                          {kind}
-                                        </span>
-                                      ) : null}
-                                      <span>{pagesLabel(source.pages)}</span>
-                                    </div>
-                                  </div>
-                                  {sourceUrl ? (
-                                    <a
-                                      href={sourceUrl}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
-                                    >
-                                      Ouvrir
-                                      <ExternalLink className="h-3 w-3" />
-                                    </a>
-                                  ) : null}
-                                </div>
-                                <div className="mt-3 space-y-1 text-sm text-slate-700">
-                                  {source.section_title ? <p>Section : {source.section_title}</p> : null}
-                                  {source.anchor_title ? <p>Repère : {source.anchor_title}</p> : null}
-                                  {source.text ? (
-                                    <p className="mt-2 line-clamp-4 rounded-md bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                                      {source.text}
-                                    </p>
-                                  ) : null}
-                                </div>
-                              </article>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-                          Aucune source documentaire disponible.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
-                    <button
-                      type="button"
-                      onClick={() => setIsVisualPanelOpen((value) => !value)}
-                      className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left hover:bg-slate-50"
-                    >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <ImageIcon className="h-4 w-4 shrink-0 text-slate-500" />
-                        <span className="text-base font-semibold text-slate-950">Extraits visuels</span>
-                        {visualRefs.length ? (
-                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500">
-                            {visualRefs.length} extrait{visualRefs.length > 1 ? "s" : ""}
-                          </span>
-                        ) : null}
-                      </span>
-                      {isVisualPanelOpen ? (
-                        <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" />
-                      ) : (
-                        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
-                      )}
-                    </button>
-                    {isVisualPanelOpen ? (
-                      visualRefs.length ? (
-                        <div className="grid gap-3 border-t border-slate-100 p-5 sm:grid-cols-2 xl:grid-cols-3">
-                          {visualRefs.map((ref, index) => {
-                            const imageUrl = normalizeAssetUrl(ref.url);
-                            if (!imageUrl) return null;
-
-                            return (
-                              <a
-                                key={`${ref.kind}-${ref.page}-${index}`}
-                                href={imageUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="block overflow-hidden rounded-lg border border-slate-200 bg-slate-50 hover:border-orange-300"
-                              >
-                                <div className="flex items-center justify-between border-b border-slate-100 bg-white px-3 py-2 text-xs text-slate-500">
-                                  <span>{visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel")}</span>
-                                  {ref.page ? <span>Page {ref.page}</span> : null}
-                                </div>
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img
-                                  src={imageUrl}
-                                  alt={`Extrait visuel page ${ref.page || index + 1}`}
-                                  className="h-auto max-h-72 w-full object-contain"
-                                />
-                              </a>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <p className="mx-5 mb-5 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-                          Aucun crop visuel disponible. La réponse et les sources restent consultables.
-                        </p>
-                      )
-                    ) : null}
+                    )}
                   </div>
                 </section>
               </div>
@@ -1899,13 +2322,25 @@ export default function AtelierPage() {
             />
           ) : null}
 
-          <aside className="w-80 shrink-0">
-            <div className="sticky top-8 rounded-xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                <h2 className="text-sm font-semibold text-slate-950">Historique</h2>
-                {isLoadingHistory ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
+          {isHistoryPanelOpen ? (
+            <>
+              <div className="fixed inset-0 z-40 bg-slate-950/20" onClick={() => setIsHistoryPanelOpen(false)} />
+              <aside className="fixed right-0 top-0 z-50 flex h-screen w-96 max-w-full flex-col border-l border-slate-200 bg-white shadow-2xl">
+              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+                <h2 className="text-base font-semibold text-slate-950">Historique</h2>
+                <div className="flex items-center gap-2">
+                  {isLoadingHistory ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
+                  <button
+                    type="button"
+                    onClick={() => setIsHistoryPanelOpen(false)}
+                    className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                    aria-label="Fermer l'historique"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
-              <div className="max-h-[calc(100vh-160px)] overflow-y-auto p-2">
+              <div className="flex-1 overflow-y-auto p-2">
                 {history.length ? (
                   <div className="space-y-1">
                     {history.map((item) => {
@@ -1934,7 +2369,10 @@ export default function AtelierPage() {
                         <button
                           key={item.question_id}
                           type="button"
-                          onClick={() => void loadQuestionDetail(item.question_id, item)}
+                          onClick={() => {
+                            setIsHistoryPanelOpen(false);
+                            void loadQuestionDetail(item.question_id, item);
+                          }}
                           className={[
                             "w-full rounded-lg px-3 py-3 text-left transition",
                             active ? "bg-orange-50" : "hover:bg-slate-50",
@@ -2018,8 +2456,60 @@ export default function AtelierPage() {
                   Chargement de la question...
                 </div>
               ) : null}
+              </aside>
+            </>
+          ) : null}
+
+          {expandedVisual ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-5"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Aperçu agrandi du visuel notice"
+              onClick={() => setExpandedVisual(null)}
+            >
+              <div
+                className="flex max-h-full w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-white shadow-2xl"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
+                  <div className="min-w-0">
+                    <h2 className="truncate text-sm font-semibold text-slate-950">{expandedVisual.title}</h2>
+                    <p className="mt-0.5 text-xs text-slate-500">{expandedVisual.meta}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {expandedVisual.sourceUrl ? (
+                      <a
+                        href={expandedVisual.sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Source
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedVisual(null)}
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+                      aria-label="Fermer l'aperçu"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto bg-slate-100 p-4">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={expandedVisual.imageUrl}
+                    alt={expandedVisual.title}
+                    className="mx-auto max-h-[calc(100vh-9rem)] w-auto max-w-full rounded-lg bg-white object-contain shadow-sm"
+                  />
+                </div>
+              </div>
             </div>
-          </aside>
+          ) : null}
         </div>
       </main>
     </AppShell>
