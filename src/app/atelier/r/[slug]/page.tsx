@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   ChevronDown,
-  ChevronUp,
   ExternalLink,
   FileText,
   Loader2,
@@ -90,9 +89,9 @@ function publicErrorMessage(status: number, fallback?: string | null) {
   return `Erreur backend (${status}).`;
 }
 
-function pagesLabel(pages?: number[] | null) {
-  if (!pages?.length) return "";
-  return `Page${pages.length > 1 ? "s" : ""} ${pages.join(", ")}`;
+function compactPagesLabel(pages?: number[] | null) {
+  if (!pages?.length) return "p. -";
+  return `p. ${pages.join(", ")}`;
 }
 
 function safeStr(value: unknown, fallback = "") {
@@ -118,13 +117,6 @@ const anchorKindLabel: Record<string, string> = {
   component: "Composant",
   reference: "Référence",
 };
-
-function visualPriority(ref: PublicVisualRef) {
-  if (ref.kind === "anchor_crop") return 0;
-  if (ref.kind === "section_crop") return 1;
-  if (ref.kind === "page_snapshot") return 2;
-  return 3;
-}
 
 function visualRefId(ref: PublicVisualRef, index: number) {
   return (
@@ -158,6 +150,31 @@ function visualLabel(ref: PublicVisualRef, fallback = "Visuel notice") {
 
 function visualMeta(ref: PublicVisualRef) {
   return [visualLabel(ref), ref.page ? `Page ${ref.page}` : ""].filter(Boolean).join(" · ");
+}
+
+function sourceKind(source: PublicSource) {
+  if (source.anchor_kind) return anchorKindLabel[source.anchor_kind] || source.anchor_kind;
+  return source.result_type === "anchor" ? "Repère" : "Section";
+}
+
+function sourceCompactLabel(source: PublicSource) {
+  return [
+    source.document_title || "Document produit",
+    source.section_title,
+    source.anchor_title,
+  ]
+    .filter(Boolean)
+    .join(" - ");
+}
+
+function visualCaption(ref: PublicVisualRef) {
+  const kind = visualLabel(ref);
+  return ref.page ? `${kind} - page ${ref.page}` : kind;
+}
+
+function expandedVisualTitle(ref: PublicVisualRef, source?: PublicSource | null) {
+  const sourceTitle = source?.document_title || "Extrait notice";
+  return ref.page ? `${sourceTitle} - page ${ref.page}` : sourceTitle;
 }
 
 function sourceUrlForVisual(ref: PublicVisualRef, sources: PublicSource[]) {
@@ -225,56 +242,77 @@ function getPrimaryBlocks(data?: PublicAtelierAnswer | null) {
 
 function NoticeVisualCard({
   refData,
-  imageUrl,
   sourceUrl,
-  alt,
-  imageClassName,
+  source,
   onExpand,
+  compact = false,
 }: {
   refData: PublicVisualRef;
-  imageUrl: string;
   sourceUrl?: string;
-  alt: string;
-  imageClassName: string;
+  source?: PublicSource | null;
   onExpand: (visual: ExpandedVisual) => void;
+  compact?: boolean;
 }) {
-  const meta = visualMeta(refData);
-  const title = refData.page ? `Extrait notice page ${refData.page}` : "Extrait notice";
+  const imageUrl = buildUrl(refData.url);
+  if (!imageUrl) return null;
+
+  const title = source?.document_title || "Document produit";
+  const kind = visualLabel(refData);
+  const finalSourceUrl = sourceUrl || buildUrl(source?.source_url) || imageUrl;
+  const expandedVisual = {
+    imageUrl,
+    sourceUrl: finalSourceUrl,
+    title: expandedVisualTitle(refData, source),
+    meta: visualMeta(refData),
+  };
 
   return (
-    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 text-xs text-slate-500">
-        <span>{visualLabel(refData)}</span>
-        {refData.page ? <span>Page {refData.page}</span> : null}
+    <div className="relative overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <FileText className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+          <span className="truncate text-xs font-semibold text-slate-700">{title}</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {refData.page ? <span className="font-mono text-xs text-slate-400">p. {refData.page}</span> : null}
+          <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600">{kind}</span>
+        </div>
       </div>
       <button
         type="button"
-        onClick={() => onExpand({ imageUrl, sourceUrl: sourceUrl || "", title, meta })}
-        className="block w-full bg-slate-50 text-left hover:bg-orange-50/40"
+        onClick={() => onExpand(expandedVisual)}
+        className={`block w-full bg-white text-left transition-colors hover:bg-orange-50/40 ${compact ? "p-3" : "p-4"}`}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={imageUrl} alt={alt} className={imageClassName} />
+        <img
+          src={imageUrl}
+          alt={`Extrait visuel page ${refData.page || 1}`}
+          className={`w-full rounded border border-slate-100 object-contain ${compact ? "max-h-44" : "max-h-72"}`}
+        />
       </button>
-      <div className="flex items-center justify-end gap-2 border-t border-slate-100 bg-white px-3 py-2">
+      <div className="flex items-center justify-between gap-3 border-t border-slate-100 bg-slate-50 px-3 py-2">
+        <span className="min-w-0 truncate text-xs italic text-slate-500">{visualCaption(refData)}</span>
+        <div className="flex shrink-0 items-center gap-3">
         <button
           type="button"
-          onClick={() => onExpand({ imageUrl, sourceUrl: sourceUrl || "", title, meta })}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+          onClick={() => onExpand(expandedVisual)}
+          className="inline-flex w-[72px] items-center justify-center gap-1 text-xs text-slate-400 transition-colors hover:text-orange-600"
         >
-          <Maximize2 className="h-3.5 w-3.5" />
+          <Maximize2 className="h-3 w-3" />
           Agrandir
         </button>
-        {sourceUrl ? (
+        {finalSourceUrl ? (
           <a
-            href={sourceUrl}
+            href={finalSourceUrl}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            className="inline-flex w-[72px] items-center justify-center gap-1 text-xs text-slate-400 transition-colors hover:text-orange-600"
           >
+            <ExternalLink className="h-3 w-3" />
             Source
-            <ExternalLink className="h-3.5 w-3.5" />
           </a>
         ) : null}
+        </div>
       </div>
     </div>
   );
@@ -332,31 +370,12 @@ export default function PublicAtelierAnswerPage() {
     };
   }, [slug]);
 
-  const visualRefs = useMemo(
-    () =>
-      (data?.visual_refs || [])
-        .filter((ref) => buildUrl(ref.url))
-        .sort((a, b) => visualPriority(a) - visualPriority(b)),
-    [data?.visual_refs],
-  );
   const answerBlocks = useMemo(() => getPrimaryBlocks(data), [data]);
   const sourcesById = useMemo(() => buildSourcesById(data), [data]);
   const visualRefsById = useMemo(() => buildVisualRefsById(data), [data]);
-  const usedSourceIds = useMemo(
-    () => new Set(answerBlocks.flatMap((block) => block.source_ids || [])),
-    [answerBlocks],
-  );
   const usedVisualRefIds = useMemo(
     () => new Set(answerBlocks.flatMap((block) => block.visual_ref_ids || [])),
     [answerBlocks],
-  );
-  const supplementarySources = useMemo(
-    () =>
-      (data?.supplementary_source_ids || [])
-        .filter((id) => !usedSourceIds.has(id))
-        .map((id) => sourcesById.get(id))
-        .filter((source): source is PublicSource => Boolean(source)),
-    [data?.supplementary_source_ids, sourcesById, usedSourceIds],
   );
   const supplementaryVisualRefs = useMemo(
     () =>
@@ -389,6 +408,28 @@ export default function PublicAtelierAnswerPage() {
 
     return map;
   }, [answerBlocks, visualRefsById]);
+  const responseVisualRefs = useMemo(
+    () =>
+      dedupeVisualRefs([...Array.from(answerBlockVisualsByBlockId.values()).flat(), ...supplementaryVisualRefs])
+        .filter((ref) => buildUrl(ref.url)),
+    [answerBlockVisualsByBlockId, supplementaryVisualRefs],
+  );
+  const responseVisualSourcesByKey = useMemo(() => {
+    const map = new Map<string, PublicSource>();
+
+    answerBlocks.forEach((block) => {
+      const firstSource = (block.source_ids || [])
+        .map((id) => sourcesById.get(id))
+        .find((source): source is PublicSource => Boolean(source));
+      if (!firstSource) return;
+
+      (answerBlockVisualsByBlockId.get(safeStr(block.block_id)) || []).forEach((ref) => {
+        map.set(visualRefDedupeKey(ref), firstSource);
+      });
+    });
+
+    return map;
+  }, [answerBlocks, answerBlockVisualsByBlockId, sourcesById]);
   const sources = Array.isArray(data?.sources) ? data.sources : [];
 
   useEffect(() => {
@@ -457,224 +498,164 @@ export default function PublicAtelierAnswerPage() {
 
       <div className="mx-auto max-w-5xl space-y-6 px-5 py-6">
         <section className="space-y-5">
-          <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <article className="overflow-hidden rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="text-base font-semibold text-slate-950">Réponse</h2>
             {answerBlocks.length ? (
-              <div className="mt-4 space-y-4">
+              <>
+              <div className="mt-4 divide-y divide-slate-100">
                 {answerBlocks.map((block) => {
                   const blockSources = (block.source_ids || [])
                     .map((id) => sourcesById.get(id))
                     .filter((source): source is PublicSource => Boolean(source));
                   const blockVisuals = answerBlockVisualsByBlockId.get(safeStr(block.block_id)) || [];
+                  const primaryVisual = blockVisuals[0];
+                  const primarySource = blockSources[0] || null;
 
                   return (
-                    <section key={block.block_id} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                      {block.title ? <h3 className="text-sm font-semibold text-slate-950">{block.title}</h3> : null}
-                      {block.confidence ? (
-                        <span className="mt-2 inline-flex rounded-full border border-slate-200 bg-white px-2 py-0.5 text-xs text-slate-500">
-                          Confiance {block.confidence}
-                        </span>
-                      ) : null}
-                      {block.text ? (
-                        <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-800">{block.text}</p>
-                      ) : null}
+                    <section key={block.block_id} className="py-5 first:pt-0 last:pb-0">
+                      <div
+                        className={[
+                          "grid gap-5",
+                          primaryVisual ? "lg:grid-cols-[minmax(0,1fr)_280px]" : "",
+                        ].join(" ")}
+                      >
+                        <div className="min-w-0">
+                          {block.title ? <h3 className="text-sm font-semibold text-slate-950">{block.title}</h3> : null}
+                          {block.confidence ? (
+                            <span className="mt-1 inline-flex rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-500">
+                              Confiance {block.confidence}
+                            </span>
+                          ) : null}
+                          {block.text ? (
+                            <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800">{block.text}</p>
+                          ) : null}
 
-                      {blockVisuals.length ? (
-                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                          {blockVisuals.map((ref, index) => {
-                            const imageUrl = buildUrl(ref.url);
-                            if (!imageUrl) return null;
-                            const sourceUrl = sourceUrlForVisual(ref, blockSources.length ? blockSources : sources);
-
-                            return (
-                              <NoticeVisualCard
-                                key={`${block.block_id}-${visualRefId(ref, index)}`}
-                                refData={ref}
-                                imageUrl={imageUrl}
-                                sourceUrl={sourceUrl}
-                                alt={`Visuel réponse page ${ref.page || index + 1}`}
-                                imageClassName="h-auto max-h-72 w-full object-contain"
-                                onExpand={setExpandedVisual}
-                              />
-                            );
-                          })}
-                        </div>
-                      ) : null}
-
-                      {blockSources.length ? (
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          {blockSources.map((source, index) => {
-                            const kind = source.anchor_kind
-                              ? anchorKindLabel[source.anchor_kind] || source.anchor_kind
-                              : source.result_type === "anchor"
-                                ? "Repère"
-                                : "Section";
-                            const pages = pagesLabel(source.pages);
-
-                            return (
-                              <span
-                                key={source.source_id || `${block.block_id}-source-${index}`}
-                                className="inline-flex max-w-full rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600"
-                              >
-                                <span className="truncate">
-                                  {source.document_title || "Document"} · {kind}
-                                  {source.section_title ? ` · ${source.section_title}` : ""}
-                                  {source.anchor_title ? ` · ${source.anchor_title}` : ""}
-                                  {pages ? ` · ${pages}` : ""}
+                          {blockSources.length ? (
+                            <div className="mt-4 flex flex-wrap gap-2">
+                              {blockSources.map((source, index) => (
+                                <span
+                                  key={source.source_id || `${block.block_id}-source-${index}`}
+                                  className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-600"
+                                >
+                                  <FileText className="h-3 w-3 shrink-0 text-slate-400" />
+                                  <span className="truncate">
+                                    {sourceKind(source)} - {sourceCompactLabel(source)}
+                                  </span>
+                                  <span className="shrink-0 font-mono text-slate-400">
+                                    {compactPagesLabel(source.pages)}
+                                  </span>
                                 </span>
-                              </span>
-                            );
-                          })}
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
-                      ) : null}
+
+                        {primaryVisual ? (
+                          <NoticeVisualCard
+                            refData={primaryVisual}
+                            source={primarySource}
+                            sourceUrl={sourceUrlForVisual(primaryVisual, blockSources.length ? blockSources : sources)}
+                            onExpand={setExpandedVisual}
+                            compact
+                          />
+                        ) : null}
+                      </div>
                     </section>
                   );
                 })}
-
-                {supplementarySources.length || supplementaryVisualRefs.length ? (
-                  <section className="rounded-xl border border-dashed border-slate-200 bg-white p-4">
-                    <h3 className="text-sm font-semibold text-slate-800">Repères complémentaires</h3>
-                    <p className="mt-1 text-xs text-slate-500">Éléments conservés en complément de la réponse principale.</p>
-                    {supplementaryVisualRefs.length ? (
-                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                        {supplementaryVisualRefs.map((ref, index) => {
-                          const imageUrl = buildUrl(ref.url);
-                          if (!imageUrl) return null;
-                          const sourceUrl = sourceUrlForVisual(ref, supplementarySources.length ? supplementarySources : sources);
-                          return (
-                            <NoticeVisualCard
-                              key={`supplementary-${visualRefId(ref, index)}`}
-                              refData={ref}
-                              imageUrl={imageUrl}
-                              sourceUrl={sourceUrl}
-                              alt={`Repère complémentaire page ${ref.page || index + 1}`}
-                              imageClassName="h-auto max-h-56 w-full object-contain"
-                              onExpand={setExpandedVisual}
-                            />
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                    {supplementarySources.length ? (
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        {supplementarySources.map((source, index) => (
-                          <span
-                            key={source.source_id || `supplementary-source-${index}`}
-                            className="inline-flex max-w-full rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-500"
-                          >
-                            <span className="truncate">
-                              {source.document_title || "Document"}
-                              {source.section_title ? ` · ${source.section_title}` : ""}
-                              {source.anchor_title ? ` · ${source.anchor_title}` : ""}
-                              {pagesLabel(source.pages) ? ` · ${pagesLabel(source.pages)}` : ""}
-                            </span>
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                  </section>
-                ) : null}
               </div>
+
+              {responseVisualRefs.length ? (
+                <div className="mt-5 border-t border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setIsVisualPanelOpen((value) => !value)}
+                    className="group flex w-full items-center justify-between px-1 py-3 text-left transition-colors hover:bg-slate-50"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Maximize2 className="h-3.5 w-3.5 text-slate-400 transition-colors group-hover:text-slate-600" />
+                      <span className="text-xs font-medium text-slate-500 transition-colors group-hover:text-slate-700">
+                        {responseVisualRefs.length} extrait{responseVisualRefs.length > 1 ? "s" : ""} visuel{responseVisualRefs.length > 1 ? "s" : ""} utilisé{responseVisualRefs.length > 1 ? "s" : ""} dans cette réponse
+                      </span>
+                    </span>
+                    <ChevronDown
+                      className={[
+                        "h-3.5 w-3.5 text-slate-400 transition-transform duration-200",
+                        isVisualPanelOpen ? "rotate-180" : "",
+                      ].join(" ")}
+                    />
+                  </button>
+
+                  {isVisualPanelOpen ? (
+                    <div className="grid gap-3 pb-5 sm:grid-cols-2">
+                      {responseVisualRefs.map((ref, index) => {
+                        const visualSource = responseVisualSourcesByKey.get(visualRefDedupeKey(ref)) || sources[0] || null;
+                        return (
+                            <NoticeVisualCard
+                              key={`response-visual-${visualRefId(ref, index)}`}
+                              refData={ref}
+                              source={visualSource}
+                              sourceUrl={sourceUrlForVisual(ref, visualSource ? [visualSource] : sources)}
+                              onExpand={setExpandedVisual}
+                              compact
+                            />
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <div className="-mx-5 -mb-5 mt-5 border-t border-slate-200 bg-slate-50 px-5 py-4">
+                <p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">
+                  Sources documentaires
+                </p>
+                {sources.length ? (
+                  <div className="flex flex-wrap gap-2">
+                    {sources.map((source, index) => {
+                      const sourceUrl = buildUrl(source.source_url);
+                      const content = (
+                        <>
+                          <FileText className="h-3 w-3 shrink-0 text-slate-400" />
+                          <span className="truncate">{sourceCompactLabel(source)}</span>
+                          <span className="shrink-0 font-mono text-slate-400">
+                            {compactPagesLabel(source.pages)}
+                          </span>
+                          {sourceUrl ? <ExternalLink className="ml-1 h-3 w-3 shrink-0 text-slate-300" /> : null}
+                        </>
+                      );
+                      const className =
+                        "inline-flex max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs text-slate-600 transition-colors hover:border-orange-300";
+
+                      return sourceUrl ? (
+                        <a
+                          key={source.source_id || index}
+                          href={sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={className}
+                        >
+                          {content}
+                        </a>
+                      ) : (
+                        <span key={source.source_id || index} className={className}>
+                          {content}
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-sm text-slate-500">Aucune source documentaire disponible.</p>
+                )}
+              </div>
+              </>
             ) : (
               <p className="mt-3 rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
                 Aucun texte de réponse disponible.
               </p>
             )}
           </article>
-
-          {sources.length ? (
-            <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h2 className="text-base font-semibold text-slate-950">Sources</h2>
-              <div className="mt-4 space-y-3">
-                {sources.map((source, index) => {
-                  const sourceUrl = buildUrl(source.source_url);
-                  return (
-                    <section key={source.source_id || index} className="rounded-xl border border-slate-200 p-4">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-slate-950">
-                            {source.document_title || "Document produit"}
-                          </p>
-                          <p className="mt-1 text-xs text-slate-500">
-                            {[source.section_title, source.anchor_title, pagesLabel(source.pages)]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </p>
-                        </div>
-                        {sourceUrl ? (
-                          <a
-                            href={sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
-                          >
-                            Ouvrir
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        ) : null}
-                      </div>
-                      {source.text ? (
-                        <p className="mt-3 line-clamp-5 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                          {source.text}
-                        </p>
-                      ) : null}
-                    </section>
-                  );
-                })}
-              </div>
-            </article>
-          ) : null}
         </section>
-
-        <article className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <button
-            type="button"
-            onClick={() => setIsVisualPanelOpen((value) => !value)}
-            className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left hover:bg-slate-50"
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <FileText className="h-4 w-4 shrink-0 text-slate-500" />
-              <span className="text-base font-semibold text-slate-950">Extraits visuels</span>
-              {visualRefs.length ? (
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500">
-                  {visualRefs.length} extrait{visualRefs.length > 1 ? "s" : ""}
-                </span>
-              ) : null}
-            </span>
-            {isVisualPanelOpen ? (
-              <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" />
-            ) : (
-              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
-            )}
-          </button>
-          {isVisualPanelOpen ? (
-            visualRefs.length ? (
-              <div className="grid gap-3 border-t border-slate-100 p-5 sm:grid-cols-2 lg:grid-cols-3">
-                {visualRefs.map((ref, index) => {
-                  const imageUrl = buildUrl(ref.url);
-                  if (!imageUrl) return null;
-                  const sourceUrl = sourceUrlForVisual(ref, sources);
-
-                  return (
-                    <NoticeVisualCard
-                      key={`${ref.kind}-${ref.page}-${index}`}
-                      refData={ref}
-                      imageUrl={imageUrl}
-                      sourceUrl={sourceUrl}
-                      alt={`Extrait visuel page ${ref.page || index + 1}`}
-                      imageClassName="h-auto w-full object-contain"
-                      onExpand={setExpandedVisual}
-                    />
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="mx-5 mb-5 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-                Aucun extrait visuel inclus.
-              </p>
-            )
-          ) : null}
-        </article>
       </div>
 
       {expandedVisual ? (

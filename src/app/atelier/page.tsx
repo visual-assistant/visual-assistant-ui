@@ -6,6 +6,7 @@ import {
   ArrowRight,
   AlertTriangle,
   ChevronDown,
+  Check,
   Clock3,
   Edit2,
   ExternalLink,
@@ -374,6 +375,37 @@ function selectVisualRefs(refs?: VisualRef[] | null) {
   return [];
 }
 
+function visualRefsUsedByAnswerBlocks(question: AtelierQuestion, fallbackRefs: VisualRef[]) {
+  const sourceRefs = question.draft?.visual_refs?.length
+    ? question.draft.visual_refs
+    : fallbackRefs;
+  const refsById = new Map(
+    sourceRefs
+      .map((ref, index) => [visualRefId(ref, index), ref] as const)
+      .filter(([id]) => Boolean(id)),
+  );
+  const usedIds = new Set(
+    (question.draft?.answer_blocks || [])
+      .flatMap((block) => block.visual_ref_ids || [])
+      .filter(Boolean),
+  );
+  const seen = new Set<string>();
+  const usedRefs = Array.from(usedIds)
+    .map((id) => refsById.get(id))
+    .filter((ref): ref is VisualRef => Boolean(ref))
+    .filter((ref) => normalizeAssetUrl(ref.url))
+    .filter((ref) => {
+      const key = visualRefDedupeKey(ref);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+  if (usedRefs.length) return usedRefs;
+
+  return dedupeVisualRefs(sourceRefs.filter((ref) => normalizeAssetUrl(ref.url)));
+}
+
 function visualRefId(ref: VisualRef, index: number) {
   return (
     safeStr(ref.visual_ref_id) ||
@@ -483,13 +515,6 @@ function dedupeVisualRefs(refs: VisualRef[]) {
   });
 }
 
-function sameStringList(a: string[], b: string[]) {
-  const cleanA = [...new Set(a.filter(Boolean))].sort();
-  const cleanB = [...new Set(b.filter(Boolean))].sort();
-  if (cleanA.length !== cleanB.length) return false;
-  return cleanA.every((value, index) => value === cleanB[index]);
-}
-
 function apiErrorMessage(status: number, fallback?: string | null) {
   if (fallback) return fallback;
   if (status === 400) return "Champ destinataire manquant ou invalide.";
@@ -521,6 +546,13 @@ function sourceCompactLabel(source: AtelierSource) {
 function visualCaption(ref: VisualRef) {
   const kind = visualKindLabel[safeStr(ref.kind)] || safeStr(ref.kind, "Visuel");
   return ref.page ? `${kind} - page ${ref.page}` : kind;
+}
+
+function answerBlocksToText(blocks: RenderAnswerBlock[]) {
+  return blocks
+    .map((block) => [safeStr(block.title), safeStr(block.text)].filter(Boolean).join("\n"))
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function expandedVisualTitle(ref: VisualRef, source?: AtelierSource | null) {
@@ -709,15 +741,12 @@ function SharePanel({
   onQuestionUpdated: (question: AtelierQuestion) => void;
   onClose: () => void;
 }) {
-  const draftVisualRefs = question.draft?.visual_refs?.length
-    ? selectVisualRefs(question.draft.visual_refs)
-    : visualRefs;
+  const draftVisualRefs = visualRefsUsedByAnswerBlocks(question, visualRefs);
   const initialIncludedIds = Array.isArray(question.draft?.included_visual_ref_ids)
     ? question.draft.included_visual_ref_ids.filter(Boolean)
     : draftVisualRefs
         .filter((ref) => ref.included !== false)
         .map((ref, index) => visualRefId(ref, index));
-  const initialAnswerText = question.draft?.answer_text || question.answer_text || "";
 
   const [channel, setChannel] = useState<ShareChannel>("WHATSAPP");
   const [recipient, setRecipient] = useState<AtelierRecipient>({
@@ -726,93 +755,19 @@ function SharePanel({
     phone: "",
     email: "",
   });
-  const [answerText, setAnswerText] = useState(initialAnswerText);
-  const [includedVisualRefIds, setIncludedVisualRefIds] = useState<string[]>(initialIncludedIds);
-  const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [isSendingShare, setIsSendingShare] = useState(false);
-  const [draftError, setDraftError] = useState<string | null>(null);
-  const [draftSaved, setDraftSaved] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendSuccess, setSendSuccess] = useState<string | null>(null);
   const [sharePreview, setSharePreview] = useState<AtelierSharePreview | null>(null);
-  const [finalMessageBody, setFinalMessageBody] = useState("");
-  const [finalMessageSubject, setFinalMessageSubject] = useState("");
-
-  const draftChanged =
-    answerText.trim() !== initialAnswerText.trim() ||
-    !sameStringList(includedVisualRefIds, initialIncludedIds);
 
   const updateRecipient = (key: keyof AtelierRecipient, value: string) => {
     setRecipient((current) => ({ ...current, [key]: value }));
   };
 
-  const applyPreviewMessageForChannel = (nextChannel: ShareChannel, preview = sharePreview) => {
-    if (!preview?.previews) return;
-    if (nextChannel === "EMAIL") {
-      setFinalMessageSubject(preview.previews.email?.subject || "");
-      setFinalMessageBody(preview.previews.email?.body || "");
-    } else {
-      setFinalMessageSubject("");
-      setFinalMessageBody(preview.previews.whatsapp?.body || "");
-    }
-  };
-
   const selectChannel = (nextChannel: ShareChannel) => {
     setChannel(nextChannel);
-    applyPreviewMessageForChannel(nextChannel);
-  };
-
-  const toggleVisualRef = (id: string) => {
-    setIncludedVisualRefIds((current) =>
-      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
-    );
-  };
-
-  const saveDraftIfNeeded = async () => {
-    if (!draftChanged) {
-      setDraftSaved(true);
-      setDraftError(null);
-      return question;
-    }
-
-    setIsSavingDraft(true);
-    setDraftError(null);
-    setDraftSaved(false);
-
-    try {
-      const res = await fetch(
-        buildUrl(`/atelier/questions/${encodeURIComponent(question.question_id)}/draft`),
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            answer_text: answerText,
-            included_visual_ref_ids: includedVisualRefIds,
-            updated_by: "service-technique",
-          }),
-        },
-      );
-
-      const payload = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(apiErrorMessage(res.status, payload?.detail || payload?.message));
-      }
-
-      const updatedQuestion = questionFromResponse(payload);
-      if (!updatedQuestion) throw new Error("Réponse Atelier invalide : question absente.");
-
-      onQuestionUpdated(updatedQuestion);
-      setDraftSaved(true);
-      return updatedQuestion;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Erreur inconnue pendant la sauvegarde.";
-      setDraftError(message);
-      throw err;
-    } finally {
-      setIsSavingDraft(false);
-    }
   };
 
   const prepareSharePreview = async () => {
@@ -822,7 +777,6 @@ function SharePanel({
     setSendSuccess(null);
 
     try {
-      await saveDraftIfNeeded();
       const res = await fetch(
         buildUrl(`/atelier/questions/${encodeURIComponent(question.question_id)}/share-preview`),
         {
@@ -845,7 +799,6 @@ function SharePanel({
       }
 
       setSharePreview(payload);
-      applyPreviewMessageForChannel(channel, payload);
       return payload;
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : "Erreur inconnue pendant la prévisualisation.");
@@ -872,19 +825,10 @@ function SharePanel({
     setSendSuccess(null);
 
     try {
-      await saveDraftIfNeeded();
       const preview = sharePreview || (await prepareSharePreview());
       if (!preview?.previews) {
         throw new Error("Prévisualisation requise avant l'envoi.");
       }
-      const fallbackBody =
-        channel === "EMAIL"
-          ? preview?.previews?.email?.body || ""
-          : preview?.previews?.whatsapp?.body || "";
-      const fallbackSubject = preview?.previews?.email?.subject || "";
-
-      const body = finalMessageBody || fallbackBody;
-      const subject = finalMessageSubject || fallbackSubject;
 
       const res = await fetch(
         buildUrl(`/atelier/questions/${encodeURIComponent(question.question_id)}/send`),
@@ -896,10 +840,6 @@ function SharePanel({
             recipient,
             actor: "service-technique",
             ttl_days: 30,
-            message: {
-              body,
-              subject: channel === "EMAIL" ? subject : undefined,
-            },
           }),
         },
       );
@@ -1018,26 +958,29 @@ function SharePanel({
               />
             </section>
 
-            <section>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Texte de réponse</p>
-                <span className="text-xs text-slate-400">
-                  {draftChanged ? "Brouillon modifié" : "Lien valide 30 jours"}
-                </span>
+            <section className="rounded-xl border border-slate-200 bg-white p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Contenu partagé</p>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-lg bg-slate-50 px-2 py-3">
+                  <p className="text-lg font-semibold text-slate-950">{question.draft?.answer_blocks?.length || 0}</p>
+                  <p className="text-xs text-slate-500">blocs</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 px-2 py-3">
+                  <p className="text-lg font-semibold text-slate-950">{question.sources?.length || 0}</p>
+                  <p className="text-xs text-slate-500">sources</p>
+                </div>
+                <div className="rounded-lg bg-slate-50 px-2 py-3">
+                  <p className="text-lg font-semibold text-slate-950">{initialIncludedIds.length}</p>
+                  <p className="text-xs text-slate-500">visuels</p>
+                </div>
               </div>
-              <textarea
-                value={answerText}
-                onChange={(event) => setAnswerText(event.target.value)}
-                rows={9}
-                className="min-h-48 w-full resize-y rounded-lg border border-slate-200 px-3 py-3 text-sm leading-6 text-slate-800 outline-none transition focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
-              />
             </section>
 
             <section>
               <div className="mb-2 flex items-center justify-between gap-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Visuels inclus</p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Visuels inclus dans la page</p>
                 <span className="text-xs text-slate-400">
-                  {includedVisualRefIds.length}/{draftVisualRefs.length}
+                  {initialIncludedIds.length}/{draftVisualRefs.length}
                 </span>
               </div>
               {draftVisualRefs.length ? (
@@ -1045,18 +988,21 @@ function SharePanel({
                   {draftVisualRefs.map((ref, index) => {
                     const id = visualRefId(ref, index);
                     const imageUrl = normalizeAssetUrl(ref.url);
-                    const checked = includedVisualRefIds.includes(id);
+                    const checked = initialIncludedIds.includes(id);
 
                     return (
-                      <label
+                      <div
                         key={id}
-                        className="flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-3 hover:bg-slate-50"
+                        className={[
+                          "flex gap-3 rounded-xl border p-3",
+                          checked ? "border-slate-200 bg-white" : "border-slate-200 bg-slate-50 opacity-60",
+                        ].join(" ")}
                       >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleVisualRef(id)}
-                          className="mt-1 h-4 w-4 accent-orange-600"
+                        <span
+                          className={[
+                            "mt-1 h-3 w-3 rounded-full",
+                            checked ? "bg-emerald-500" : "bg-slate-300",
+                          ].join(" ")}
                         />
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -1076,7 +1022,7 @@ function SharePanel({
                             <p className="mt-1 text-xs text-slate-400">Image indisponible</p>
                           )}
                         </div>
-                      </label>
+                      </div>
                     );
                   })}
                 </div>
@@ -1092,13 +1038,13 @@ function SharePanel({
                 <div>
                   <p className="text-sm font-semibold text-slate-900">Prévisualisation</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Le brouillon est sauvegardé avant chaque préparation.
+                    Le lien public reprend la réponse sauvegardée dans l&apos;écran principal.
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => void prepareSharePreview()}
-                  disabled={isPreparingPreview || isSavingDraft}
+                  disabled={isPreparingPreview}
                   className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
                 >
                   {isPreparingPreview ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
@@ -1131,25 +1077,22 @@ function SharePanel({
                       </a>
                     ) : null}
                     <p className="mt-2 text-xs text-slate-500">
-                      {sharePreview.previews.web?.visual_count ?? includedVisualRefIds.length} visuel
-                      {(sharePreview.previews.web?.visual_count ?? includedVisualRefIds.length) > 1 ? "s" : ""} inclus
+                      {sharePreview.previews.web?.visual_count ?? initialIncludedIds.length} visuel
+                      {(sharePreview.previews.web?.visual_count ?? initialIncludedIds.length) > 1 ? "s" : ""} inclus
                     </p>
                   </div>
 
                   <div className="rounded-lg border border-slate-200 p-3">
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Message {channel === "EMAIL" ? "email" : "WhatsApp"}
+                      Message {channel === "EMAIL" ? "email" : "WhatsApp"} généré
                     </p>
                     {channel === "EMAIL" ? (
                       <>
-                        <label className="mt-3 block text-xs font-medium text-slate-500">Objet</label>
-                        <input
-                          value={finalMessageSubject}
-                          onChange={(event) => setFinalMessageSubject(event.target.value)}
-                          className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
-                        />
                         <p className="mt-3 text-xs text-slate-500">
                           Pour : {sharePreview.previews.email?.to || recipient.email || "email non renseigné"}
+                        </p>
+                        <p className="mt-2 rounded-lg bg-slate-50 px-3 py-2 text-sm font-medium text-slate-800">
+                          {sharePreview.previews.email?.subject || "Réponse technique PERGE"}
                         </p>
                       </>
                     ) : (
@@ -1157,18 +1100,18 @@ function SharePanel({
                         Vers : {sharePreview.previews.whatsapp?.to || recipient.phone || "téléphone non renseigné"}
                       </p>
                     )}
-                    <label className="mt-3 block text-xs font-medium text-slate-500">Corps du message</label>
-                    <textarea
-                      value={finalMessageBody}
-                      onChange={(event) => setFinalMessageBody(event.target.value)}
-                      rows={7}
-                      className="mt-1 w-full resize-y rounded-lg border border-slate-200 px-3 py-3 text-sm leading-6 text-slate-800 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
-                    />
+                    <div className="mt-3 max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-700">
+                      <p className="whitespace-pre-wrap">
+                        {channel === "EMAIL"
+                          ? sharePreview.previews.email?.body || ""
+                          : sharePreview.previews.whatsapp?.body || ""}
+                      </p>
+                    </div>
                   </div>
                 </div>
               ) : (
                 <p className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-                  Renseignez le destinataire, ajustez le brouillon, puis cliquez sur Prévisualiser.
+                  Renseignez le destinataire, puis cliquez sur Prévisualiser.
                 </p>
               )}
             </section>
@@ -1176,18 +1119,9 @@ function SharePanel({
         </div>
 
         <div className="border-t border-slate-200 bg-white px-5 py-4">
-          {draftError ? (
-            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-              {draftError}
-            </div>
-          ) : draftSaved ? (
-            <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-              Brouillon sauvegardé.
-            </div>
-          ) : null}
           {sharePreview?.previews && !sendError && !sendSuccess ? (
             <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
-              Prévisualisation prête. Vous pouvez envoyer ou ajuster le message.
+              Prévisualisation prête. Vous pouvez envoyer la réponse.
             </div>
           ) : null}
           {sendError ? (
@@ -1200,20 +1134,11 @@ function SharePanel({
               {sendSuccess}
             </div>
           ) : null}
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] gap-2">
-            <button
-              type="button"
-              onClick={() => void saveDraftIfNeeded()}
-              disabled={isSavingDraft || isPreparingPreview || isSendingShare || !draftChanged}
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isSavingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              {isSavingDraft ? "Sauvegarde..." : "Sauver"}
-            </button>
+          <div className="grid gap-2">
             <button
               type="button"
               onClick={() => void sendShare()}
-              disabled={isSavingDraft || isPreparingPreview || isSendingShare}
+              disabled={isPreparingPreview || isSendingShare}
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-orange-600 px-4 py-3 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
             >
               {isSendingShare || isPreparingPreview ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
@@ -1238,13 +1163,15 @@ export default function AtelierPage() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
-  const [isComposingAnswer, setIsComposingAnswer] = useState(false);
   const [isEditingQuestion, setIsEditingQuestion] = useState(false);
+  const [isAnswerEditing, setIsAnswerEditing] = useState(false);
+  const [editableAnswerBlocks, setEditableAnswerBlocks] = useState<RenderAnswerBlock[]>([]);
+  const [isSavingAnswerDraft, setIsSavingAnswerDraft] = useState(false);
   const [isSharePanelOpen, setIsSharePanelOpen] = useState(false);
   const [editedQuestionText, setEditedQuestionText] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [composeError, setComposeError] = useState<string | null>(null);
-  const [composeSuccess, setComposeSuccess] = useState(false);
+  const [answerDraftError, setAnswerDraftError] = useState<string | null>(null);
+  const [answerDraftSaved, setAnswerDraftSaved] = useState(false);
   const [isPreviewingPublicAnswer, setIsPreviewingPublicAnswer] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [isVisualPanelOpen, setIsVisualPanelOpen] = useState(false);
@@ -1318,9 +1245,11 @@ export default function AtelierPage() {
     setIsSharePanelOpen(false);
     setIsVisualPanelOpen(false);
     setExpandedVisual(null);
+    setIsAnswerEditing(false);
+    setEditableAnswerBlocks([]);
     setError(null);
-    setComposeError(null);
-    setComposeSuccess(false);
+    setAnswerDraftError(null);
+    setAnswerDraftSaved(false);
     setPreviewError(null);
     setSelectedCorrectionProduct("");
     setIsProductDropdownOpen(false);
@@ -1359,6 +1288,9 @@ export default function AtelierPage() {
       setCurrentQuestion(createdQuestion);
       setEditedQuestionText(createdQuestion.question || "");
       setIsEditingQuestion(false);
+      setIsAnswerEditing(false);
+      setEditableAnswerBlocks([]);
+      setAnswerDraftSaved(false);
       setSelectedCorrectionProduct("");
       setManualCorrectedProduct(null);
       setIsProductCorrectionOpen(false);
@@ -1376,6 +1308,9 @@ export default function AtelierPage() {
       setCurrentQuestion(optimisticQuestion);
       setEditedQuestionText(optimisticQuestion.question || "");
       setIsEditingQuestion(false);
+      setIsAnswerEditing(false);
+      setEditableAnswerBlocks([]);
+      setAnswerDraftSaved(false);
       setSelectedCorrectionProduct("");
       setIsProductDropdownOpen(false);
       setIsProductCorrectionOpen(false);
@@ -1395,6 +1330,9 @@ export default function AtelierPage() {
       setCurrentQuestion(detailQuestion);
       setEditedQuestionText(detailQuestion.question || "");
       setIsEditingQuestion(false);
+      setIsAnswerEditing(false);
+      setEditableAnswerBlocks([]);
+      setAnswerDraftSaved(false);
       setSelectedCorrectionProduct("");
       setIsProductDropdownOpen(false);
       setIsProductCorrectionOpen(false);
@@ -1409,6 +1347,8 @@ export default function AtelierPage() {
   const applyQuestionUpdate = (updatedQuestion: AtelierQuestion) => {
     setCurrentQuestion(updatedQuestion);
     setEditedQuestionText(updatedQuestion.question || "");
+    setIsAnswerEditing(false);
+    setEditableAnswerBlocks([]);
     setHistory((items) => {
       const hasExistingItem = items.some((item) => item.question_id === updatedQuestion.question_id);
       if (!hasExistingItem) return items;
@@ -1510,23 +1450,61 @@ export default function AtelierPage() {
     }
   };
 
-  const composeAnswer = async () => {
-    if (!currentQuestion?.question_id || isComposingAnswer) return;
+  const startAnswerEdit = () => {
+    if (!answerBlocks.length) return;
+    setEditableAnswerBlocks(answerBlocks.map((block) => ({ ...block })));
+    setIsAnswerEditing(true);
+    setIsSharePanelOpen(false);
+    setAnswerDraftError(null);
+    setAnswerDraftSaved(false);
+  };
 
-    setIsComposingAnswer(true);
-    setComposeError(null);
-    setComposeSuccess(false);
+  const cancelAnswerEdit = () => {
+    setEditableAnswerBlocks([]);
+    setIsAnswerEditing(false);
+    setAnswerDraftError(null);
+  };
+
+  const updateEditableAnswerBlock = (
+    blockId: string,
+    field: "title" | "text",
+    value: string,
+  ) => {
+    setEditableAnswerBlocks((blocks) =>
+      blocks.map((block) =>
+        block.block_id === blockId ? { ...block, [field]: value } : block,
+      ),
+    );
+  };
+
+  const saveAnswerDraft = async () => {
+    if (!currentQuestion?.question_id || !editableAnswerBlocks.length || isSavingAnswerDraft) return;
+
+    setIsSavingAnswerDraft(true);
+    setAnswerDraftError(null);
+    setAnswerDraftSaved(false);
 
     try {
+      const normalizedBlocks = editableAnswerBlocks.map((block, index) => ({
+        ...block,
+        title: safeStr(block.title) || null,
+        text: safeStr(block.text),
+        source_ids: block.source_ids || [],
+        visual_ref_ids: block.visual_ref_ids || [],
+        order: block.order ?? index,
+      }));
+
       const res = await fetch(
-        buildUrl(`/atelier/questions/${encodeURIComponent(currentQuestion.question_id)}/compose`),
+        buildUrl(`/atelier/questions/${encodeURIComponent(currentQuestion.question_id)}/draft`),
         {
-          method: "POST",
+          method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            use_draft: true,
-            use_ai: true,
-            actor: "service-technique",
+            answer_text: answerBlocksToText(normalizedBlocks),
+            answer_blocks: normalizedBlocks,
+            composition_status: "COMPOSED",
+            composition_reason: "Réponse modifiée manuellement dans l'Atelier.",
+            updated_by: "service-technique",
           }),
         },
       );
@@ -1536,15 +1514,16 @@ export default function AtelierPage() {
         throw new Error(apiErrorMessage(res.status, payload?.detail || payload?.message));
       }
 
-      const composedQuestion = questionFromResponse(payload);
-      if (!composedQuestion) throw new Error("Réponse Atelier invalide : question absente.");
+      const updatedQuestion = questionFromResponse(payload);
+      if (!updatedQuestion) throw new Error("Réponse Atelier invalide : question absente.");
 
-      applyQuestionUpdate(composedQuestion);
-      setComposeSuccess(true);
+      applyQuestionUpdate(updatedQuestion);
+      setAnswerDraftSaved(true);
+      void loadHistory();
     } catch (err) {
-      setComposeError(err instanceof Error ? err.message : "Erreur inconnue pendant la recomposition.");
+      setAnswerDraftError(err instanceof Error ? err.message : "Erreur inconnue pendant la sauvegarde.");
     } finally {
-      setIsComposingAnswer(false);
+      setIsSavingAnswerDraft(false);
     }
   };
 
@@ -1672,6 +1651,7 @@ export default function AtelierPage() {
 
     return map;
   }, [answerBlocks, answerBlockVisualsByBlockId, sourcesById]);
+  const visibleAnswerBlocks = isAnswerEditing ? editableAnswerBlocks : answerBlocks;
 
   return (
     <AppShell>
@@ -2073,50 +2053,80 @@ export default function AtelierPage() {
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <h3 className="text-base font-semibold text-slate-950">Réponse</h3>
                         <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void composeAnswer()}
-                            disabled={!answerBlocks.length || isRegenerating || isComposingAnswer}
-                            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isComposingAnswer ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <RefreshCw className="h-4 w-4" />
-                            )}
-                            {isComposingAnswer ? "Recomposition..." : "Recomposer"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void previewPublicAnswer()}
-                            disabled={!answerBlocks.length || isRegenerating || isPreviewingPublicAnswer}
-                            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isPreviewingPublicAnswer ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <Monitor className="h-4 w-4" />
-                            )}
-                            {isPreviewingPublicAnswer ? "Prévisualisation..." : "Prévisualiser"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setIsSharePanelOpen(true)}
-                            disabled={!answerBlocks.length || isRegenerating}
-                            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-                          >
-                            <Send className="h-4 w-4" />
-                            Partager
-                          </button>
+                          {isAnswerEditing ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={cancelAnswerEdit}
+                                disabled={isSavingAnswerDraft}
+                                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                Annuler
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void saveAnswerDraft()}
+                                disabled={isSavingAnswerDraft || !editableAnswerBlocks.length}
+                                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                              >
+                                {isSavingAnswerDraft ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Check className="h-4 w-4" />
+                                )}
+                                {isSavingAnswerDraft ? "Enregistrement..." : "Enregistrer"}
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={startAnswerEdit}
+                                disabled={!answerBlocks.length || isRegenerating}
+                                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                <Edit2 className="h-4 w-4" />
+                                Modifier
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void previewPublicAnswer()}
+                                disabled={!answerBlocks.length || isRegenerating || isPreviewingPublicAnswer}
+                                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {isPreviewingPublicAnswer ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Monitor className="h-4 w-4" />
+                                )}
+                                {isPreviewingPublicAnswer ? "Prévisualisation..." : "Prévisualiser"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setIsSharePanelOpen(true)}
+                                disabled={!answerBlocks.length || isRegenerating}
+                                className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                              >
+                                <Send className="h-4 w-4" />
+                                Partager
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
-                      {composeError ? (
+                      {answerDraftError ? (
                         <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                          {composeError}
+                          {answerDraftError}
                         </div>
-                      ) : composeSuccess ? (
+                      ) : answerDraftSaved ? (
                         <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-                          Réponse recomposée.
+                          Réponse modifiée enregistrée.
+                        </div>
+                      ) : null}
+                      {isAnswerEditing ? (
+                        <div className="mt-3 flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
+                          <AlertCircle className="h-4 w-4 shrink-0 text-orange-600" />
+                          Mode modification - éditez les blocs visibles, puis enregistrez avant de partager.
                         </div>
                       ) : null}
                       {previewError ? (
@@ -2134,10 +2144,10 @@ export default function AtelierPage() {
                           La génération de réponse a échoué côté backend.
                         </div>
                       ) : null}
-                      {answerBlocks.length ? (
+                      {visibleAnswerBlocks.length ? (
                         <>
                           <div className="mt-4 divide-y divide-slate-100">
-                            {answerBlocks.map((block) => {
+                            {visibleAnswerBlocks.map((block) => {
                               const blockSources = block.source_ids
                                 .map((id) => sourcesById.get(id))
                                 .filter((source): source is AtelierSource => Boolean(source));
@@ -2156,7 +2166,16 @@ export default function AtelierPage() {
                                     <div className="min-w-0">
                                       <div className="flex flex-wrap items-start justify-between gap-3">
                                         <div className="min-w-0">
-                                          {block.title ? (
+                                          {isAnswerEditing ? (
+                                            <input
+                                              value={safeStr(block.title)}
+                                              onChange={(event) =>
+                                                updateEditableAnswerBlock(block.block_id, "title", event.target.value)
+                                              }
+                                              placeholder="Titre du bloc"
+                                              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-950 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+                                            />
+                                          ) : block.title ? (
                                             <h4 className="text-sm font-semibold text-slate-950">{block.title}</h4>
                                           ) : null}
                                           {block.confidence ? (
@@ -2167,7 +2186,16 @@ export default function AtelierPage() {
                                         </div>
                                       </div>
 
-                                      {block.text ? (
+                                      {isAnswerEditing ? (
+                                        <textarea
+                                          value={safeStr(block.text)}
+                                          onChange={(event) =>
+                                            updateEditableAnswerBlock(block.block_id, "text", event.target.value)
+                                          }
+                                          rows={Math.max(4, safeStr(block.text).split("\n").length + 2)}
+                                          className="mt-3 min-h-28 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-800 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+                                        />
+                                      ) : block.text ? (
                                         <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800">
                                           {block.text}
                                         </p>
