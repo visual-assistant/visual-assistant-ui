@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   BookOpen,
   Check,
   ChevronDown,
@@ -121,6 +122,101 @@ type ProductDocumentIndex = {
   outline_candidates?: unknown[] | null;
 };
 
+type BulkReviewStatus = "READY" | "CHECK" | "DUPLICATE" | "IGNORED" | "EXCLUDED";
+type BulkPipelineStatus = "PENDING" | "RUNNING" | "DONE" | "FAILED";
+type BulkItemStatus = "PENDING" | "RUNNING" | "INDEXED" | "FAILED" | "IGNORED" | "SKIPPED";
+type BulkStep = "SCAN" | "SUMMARY" | "REVIEW" | "PIPELINE" | "DONE";
+
+type BulkManifestFile = {
+  client_file_id: string;
+  filename: string;
+  relative_path: string;
+  size: number;
+  last_modified: number;
+  mime_type: string;
+  sha256?: string;
+};
+
+type BulkFolderSummary = {
+  path?: string | null;
+  pdf_count?: number | null;
+  ignored_count?: number | null;
+};
+
+type BulkImportItem = {
+  item_id: string;
+  source_file?: BulkManifestFile | null;
+  review_status?: BulkReviewStatus | string | null;
+  review_reasons?: string[] | null;
+  duplicate_matches?: unknown[] | null;
+  metadata?: {
+    product_code?: string | null;
+    product_label?: string | null;
+    title?: string | null;
+    document_type?: string | null;
+    version?: string | null;
+    tags?: string[] | null;
+  } | null;
+  pipeline?: {
+    upload_status?: BulkPipelineStatus | string | null;
+    metadata_status?: BulkPipelineStatus | string | null;
+    index_status?: BulkPipelineStatus | string | null;
+    last_error?: string | null;
+    attempt_count?: number | null;
+    started_at?: number | string | null;
+    completed_at?: number | string | null;
+  } | null;
+  status?: BulkItemStatus | string | null;
+  last_error?: string | null;
+};
+
+type BulkImportBatch = {
+  batch_id?: string | null;
+  id?: string | null;
+  root_name?: string | null;
+  step?: BulkStep | string | null;
+  counts?: {
+    total?: number | null;
+    ready?: number | null;
+    check?: number | null;
+    duplicate?: number | null;
+    ignored?: number | null;
+    excluded?: number | null;
+    accepted?: number | null;
+    indexed?: number | null;
+    failed?: number | null;
+    running?: number | null;
+    pending?: number | null;
+  } | null;
+  progress?: {
+    accepted_count?: number | null;
+    completed_count?: number | null;
+    percent?: number | null;
+  } | null;
+  folders?: BulkFolderSummary[] | null;
+  items?: BulkImportItem[] | null;
+};
+
+type BulkImportResponse = {
+  ok?: boolean;
+  batch?: BulkImportBatch;
+  item?: BulkImportItem;
+  retry_mode?: "index" | "upload" | string;
+  requires_file_upload?: boolean;
+  next_endpoint?: string;
+  accepted_item_ids?: string[];
+  skipped_item_ids?: string[];
+  not_found_item_ids?: string[];
+  ignored_item_ids?: string[];
+  duplicate_item_ids?: string[];
+  invalid_status_item_ids?: string[];
+  accepted_count?: number;
+  skipped_count?: number;
+  detail?: string;
+  message?: string;
+  error?: string;
+};
+
 type IndexPage = {
   page?: number | null;
   text?: string | null;
@@ -234,6 +330,28 @@ const anchorKindLabel: Record<string, string> = {
   reference: "Référence",
 };
 
+const bulkReviewLabels: Record<BulkReviewStatus, string> = {
+  READY: "Prêt",
+  CHECK: "À vérifier",
+  DUPLICATE: "Doublon",
+  IGNORED: "Ignoré auto",
+  EXCLUDED: "Exclu",
+};
+
+const bulkReviewClasses: Record<BulkReviewStatus, string> = {
+  READY: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  CHECK: "border-amber-200 bg-amber-50 text-amber-700",
+  DUPLICATE: "border-orange-200 bg-orange-50 text-orange-700",
+  IGNORED: "border-slate-200 bg-slate-100 text-slate-500",
+  EXCLUDED: "border-slate-300 bg-slate-100 text-slate-500",
+};
+
+const bulkPipelineSteps = [
+  { key: "upload_status", label: "Upload" },
+  { key: "metadata_status", label: "Métadonnées" },
+  { key: "index_status", label: "Indexation" },
+] as const;
+
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
@@ -328,6 +446,50 @@ function unwrapIndexResponse(data: unknown): ProductDocumentIndex | null {
     return record.index as ProductDocumentIndex;
   }
   return record as ProductDocumentIndex;
+}
+
+function unwrapBulkBatch(data: unknown): BulkImportBatch | null {
+  if (!data || typeof data !== "object") return null;
+  const record = data as BulkImportResponse;
+  return record.batch || (record as BulkImportBatch);
+}
+
+function bulkBatchId(batch?: BulkImportBatch | null) {
+  return safeStr(batch?.batch_id || batch?.id);
+}
+
+function bulkReviewStatus(value?: string | null): BulkReviewStatus {
+  const status = safeStr(value).toUpperCase();
+  if (status === "CHECK" || status === "DUPLICATE" || status === "IGNORED" || status === "EXCLUDED") return status;
+  return "READY";
+}
+
+function bulkPipelineStatus(value?: string | null): BulkPipelineStatus {
+  const status = safeStr(value).toUpperCase();
+  if (status === "RUNNING" || status === "DONE" || status === "FAILED") return status;
+  return "PENDING";
+}
+
+function bulkItemFilename(item: BulkImportItem) {
+  return safeStr(item.source_file?.filename, "Fichier");
+}
+
+function bulkItemPath(item: BulkImportItem) {
+  return safeStr(item.source_file?.relative_path || item.source_file?.filename);
+}
+
+function bulkItemCanBeSelected(item: BulkImportItem) {
+  return bulkReviewStatus(item.review_status) !== "IGNORED";
+}
+
+function bulkItemDefaultSelected(item: BulkImportItem) {
+  const status = bulkReviewStatus(item.review_status);
+  return status === "READY" || status === "CHECK";
+}
+
+function bulkReincludeStatus(item: BulkImportItem): BulkReviewStatus {
+  const metadata = item.metadata || {};
+  return metadata.product_code && metadata.document_type ? "READY" : "CHECK";
 }
 
 function uniqStrings(values: string[]) {
@@ -475,6 +637,44 @@ function InfoBox({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   );
+}
+
+function BulkPipelineStepIcon({ status }: { status?: string | null }) {
+  const normalized = bulkPipelineStatus(status);
+  if (normalized === "DONE") return <Check className="h-3.5 w-3.5 text-emerald-600" />;
+  if (normalized === "RUNNING") return <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />;
+  if (normalized === "FAILED") return <AlertTriangle className="h-3.5 w-3.5 text-red-500" />;
+  return <span className="h-3.5 w-3.5 rounded-full border border-slate-300" />;
+}
+
+function bulkOverallLabel(item: BulkImportItem) {
+  const status = safeStr(item.status).toUpperCase();
+  const pipeline = item.pipeline || {};
+  if (status === "INDEXED" || bulkPipelineStatus(pipeline.index_status) === "DONE") {
+    return { label: "Indexé", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  }
+  if (
+    status === "FAILED" ||
+    bulkPipelineStatus(pipeline.upload_status) === "FAILED" ||
+    bulkPipelineStatus(pipeline.metadata_status) === "FAILED" ||
+    bulkPipelineStatus(pipeline.index_status) === "FAILED"
+  ) {
+    return { label: "Échec", cls: "border-red-200 bg-red-50 text-red-700" };
+  }
+  if (status === "IGNORED" || status === "SKIPPED") {
+    return { label: "Ignoré", cls: "border-slate-200 bg-slate-100 text-slate-500" };
+  }
+  if (
+    status === "RUNNING" ||
+    bulkPipelineStatus(pipeline.upload_status) === "RUNNING" ||
+    bulkPipelineStatus(pipeline.metadata_status) === "RUNNING" ||
+    bulkPipelineStatus(pipeline.index_status) === "RUNNING" ||
+    bulkPipelineStatus(pipeline.upload_status) === "DONE" ||
+    bulkPipelineStatus(pipeline.metadata_status) === "DONE"
+  ) {
+    return { label: "En cours", cls: "border-blue-200 bg-blue-50 text-blue-700" };
+  }
+  return { label: "En attente", cls: "border-slate-200 bg-white text-slate-500" };
 }
 
 function getItemVisualRefs(item?: SelectedOutlineItem | null) {
@@ -744,6 +944,595 @@ function PlanTree({
   );
 }
 
+function BulkImportMode({
+  files,
+  rootName,
+  productOptions,
+  documentTypeOptions,
+  onClose,
+  onDone,
+}: {
+  files: File[];
+  rootName: string;
+  productOptions: Array<{ code: string; label: string }>;
+  documentTypeOptions: Array<{ code: string; label: string }>;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [step, setStep] = useState<"scan" | "summary" | "review" | "pipeline" | "done">("scan");
+  const [batch, setBatch] = useState<BulkImportBatch | null>(null);
+  const [scanLines, setScanLines] = useState<string[]>([]);
+  const [activeFilter, setActiveFilter] = useState<BulkReviewStatus | "ALL">("ALL");
+  const [importSelected, setImportSelected] = useState<Set<string>>(new Set());
+  const [launchedItemIds, setLaunchedItemIds] = useState<Set<string>>(new Set());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [bulkProduct, setBulkProduct] = useState("");
+  const [bulkType, setBulkType] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [uploadingIds, setUploadingIds] = useState<Set<string>>(new Set());
+  const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  const manifest = useMemo<BulkManifestFile[]>(
+    () =>
+      files.map((file, index) => {
+        const relativePath = safeStr((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name);
+        return {
+          client_file_id: `file_${index}_${relativePath}_${file.size}_${file.lastModified}`,
+          filename: file.name,
+          relative_path: relativePath,
+          size: file.size,
+          last_modified: file.lastModified,
+          mime_type: file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "application/octet-stream"),
+        };
+      }),
+    [files],
+  );
+
+  const fileByClientId = useMemo(() => {
+    const map = new Map<string, File>();
+    manifest.forEach((file, index) => {
+      map.set(file.client_file_id, files[index]);
+    });
+    return map;
+  }, [files, manifest]);
+
+  const batchId = bulkBatchId(batch);
+  const items = batch?.items || [];
+  const counts = batch?.counts || {};
+  const reviewImportItems = items.filter((item) => importSelected.has(item.item_id));
+  const pipelineItems = launchedItemIds.size
+    ? items.filter((item) => launchedItemIds.has(item.item_id))
+    : items.filter((item) => {
+      const status = bulkReviewStatus(item.review_status);
+      return status === "READY" || status === "CHECK";
+    });
+  const filteredItems = items.filter((item) =>
+    activeFilter === "ALL"
+      ? bulkReviewStatus(item.review_status) !== "IGNORED"
+      : bulkReviewStatus(item.review_status) === activeFilter,
+  );
+  const visibleSelectableItems = filteredItems.filter((item) => {
+    const status = bulkReviewStatus(item.review_status);
+    return status !== "IGNORED" && status !== "EXCLUDED";
+  });
+  const allVisibleSelected = visibleSelectableItems.length > 0 && visibleSelectableItems.every((item) => importSelected.has(item.item_id));
+  const someVisibleSelected = visibleSelectableItems.some((item) => importSelected.has(item.item_id));
+  const doneCountFallback = pipelineItems.filter((item) => {
+    const status = safeStr(item.status).toUpperCase();
+    return status === "INDEXED" || status === "FAILED";
+  }).length;
+  const acceptedCount = safeNum(batch?.progress?.accepted_count) ?? (launchedItemIds.size || pipelineItems.length);
+  const doneCount = safeNum(batch?.progress?.completed_count) ?? doneCountFallback;
+  const progress = safeNum(batch?.progress?.percent) ?? (acceptedCount ? Math.round((doneCount / acceptedCount) * 100) : 0);
+
+  const refreshBatch = useCallback(async (showError = true) => {
+    if (!batchId) return null;
+    try {
+      const res = await fetch(buildUrl(`/product-documents/bulk-imports/${encodeURIComponent(batchId)}`), { cache: "no-store" });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(payload?.detail || payload?.message || `Batch indisponible (${res.status})`);
+      const nextBatch = unwrapBulkBatch(payload);
+      if (!nextBatch) throw new Error("Réponse bulk invalide : batch absent.");
+      setBatch(nextBatch);
+      return nextBatch;
+    } catch (err) {
+      if (showError) setError(err instanceof Error ? err.message : "Impossible de rafraîchir le batch.");
+      return null;
+    }
+  }, [batchId]);
+
+  useEffect(() => {
+    const folders = new Map<string, { pdf: number; ignored: number }>();
+    manifest.forEach((file) => {
+      const parts = file.relative_path.split("/");
+      const folder = parts.length > 1 ? `${parts.slice(0, -1).join("/")}/` : "/";
+      const entry = folders.get(folder) || { pdf: 0, ignored: 0 };
+      if (file.filename.toLowerCase().endsWith(".pdf")) entry.pdf += 1;
+      else entry.ignored += 1;
+      if (folder.includes("Archives/") || folder.includes("_temp/")) entry.ignored += 1;
+      folders.set(folder, entry);
+    });
+
+    const lines = Array.from(folders.entries()).map(
+      ([folder, value]) =>
+        `${folder} → ${value.pdf} PDF${value.pdf > 1 ? "s" : ""}${value.ignored ? ` · ${value.ignored} ignoré${value.ignored > 1 ? "s" : ""}` : ""}`,
+    );
+    lines.forEach((line, index) => {
+      window.setTimeout(() => setScanLines((current) => (current.includes(line) ? current : [...current, line])), 160 + index * 180);
+    });
+
+    const timer = window.setTimeout(async () => {
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await fetch(buildUrl("/product-documents/bulk-imports"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ root_name: rootName, files: manifest }),
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(payload?.detail || payload?.message || `Création batch impossible (${res.status})`);
+        const createdBatch = unwrapBulkBatch(payload);
+        if (!createdBatch) throw new Error("Réponse bulk invalide : batch absent.");
+        setBatch(createdBatch);
+        setImportSelected(new Set((createdBatch.items || []).filter(bulkItemDefaultSelected).map((item) => item.item_id)));
+        setStep("summary");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Erreur inconnue pendant la création du batch.");
+      } finally {
+        setBusy(false);
+      }
+    }, Math.max(900, lines.length * 180 + 500));
+
+    return () => window.clearTimeout(timer);
+  }, [manifest, rootName]);
+
+  useEffect(() => {
+    if (!headerCheckboxRef.current) return;
+    headerCheckboxRef.current.indeterminate = !allVisibleSelected && someVisibleSelected;
+  }, [allVisibleSelected, someVisibleSelected]);
+
+  useEffect(() => {
+    if (step !== "pipeline" || !batchId) return;
+    if (pollRef.current) window.clearInterval(pollRef.current);
+    pollRef.current = window.setInterval(() => {
+      void refreshBatch(false);
+    }, 1600);
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    };
+  }, [step, batchId, refreshBatch]);
+
+  useEffect(() => {
+    if (step !== "pipeline" || !batch) return;
+    if (safeStr(batch.step).toUpperCase() === "DONE" || (acceptedCount > 0 && doneCount >= acceptedCount)) {
+      setStep("done");
+    }
+  }, [acceptedCount, batch, doneCount, step]);
+
+  const patchItems = async (patches: Array<Record<string, unknown> & { item_id: string }>) => {
+    if (!batchId || !patches.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(buildUrl(`/product-documents/bulk-imports/${encodeURIComponent(batchId)}/items`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: patches }),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(payload?.detail || payload?.message || `Mise à jour impossible (${res.status})`);
+      const nextBatch = unwrapBulkBatch(payload);
+      if (nextBatch) setBatch(nextBatch);
+      setEditingId(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur inconnue pendant la mise à jour.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const uploadItemFile = async (item: BulkImportItem, targetBatchId = batchId) => {
+    const file = fileByClientId.get(safeStr(item.source_file?.client_file_id));
+    if (!targetBatchId || !file) return;
+    setUploadingIds((current) => new Set(current).add(item.item_id));
+    try {
+      const form = new FormData();
+      form.append("file", file, file.name);
+      const res = await fetch(
+        buildUrl(`/product-documents/bulk-imports/${encodeURIComponent(targetBatchId)}/items/${encodeURIComponent(item.item_id)}/file`),
+        { method: "POST", body: form },
+      );
+      const payload = (await res.json().catch(() => null)) as BulkImportResponse | null;
+      if (!res.ok || payload?.ok === false) {
+        throw new Error(payload?.detail || payload?.message || payload?.error || `Upload impossible (${res.status})`);
+      }
+      if (payload?.batch) setBatch(payload.batch);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Upload échoué pour ${bulkItemFilename(item)}.`);
+    } finally {
+      setUploadingIds((current) => {
+        const next = new Set(current);
+        next.delete(item.item_id);
+        return next;
+      });
+    }
+  };
+
+  const launchPipeline = async () => {
+    const selectedItemIds = Array.from(importSelected);
+    if (!batchId || selectedItemIds.length === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(buildUrl(`/product-documents/bulk-imports/${encodeURIComponent(batchId)}/launch`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selected_item_ids: selectedItemIds }),
+      });
+      const payload = (await res.json().catch(() => null)) as BulkImportResponse | null;
+      if (!res.ok) throw new Error(payload?.detail || payload?.message || `Lancement impossible (${res.status})`);
+      const launchedBatch = unwrapBulkBatch(payload);
+      if (!launchedBatch) throw new Error("Réponse bulk invalide : batch absent.");
+      setBatch(launchedBatch);
+      setStep("pipeline");
+      const launchId = bulkBatchId(launchedBatch) || batchId;
+      const acceptedIds = new Set(payload?.accepted_item_ids || []);
+      setLaunchedItemIds(acceptedIds);
+      const toUpload = (launchedBatch.items || []).filter((item) => {
+        return acceptedIds.has(item.item_id) && fileByClientId.has(safeStr(item.source_file?.client_file_id));
+      });
+      await Promise.all(toUpload.map((item) => uploadItemFile(item, launchId)));
+      void refreshBatch(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur inconnue pendant le lancement.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryItem = async (item: BulkImportItem) => {
+    if (!batchId) return;
+    setError(null);
+    try {
+      const res = await fetch(
+        buildUrl(`/product-documents/bulk-imports/${encodeURIComponent(batchId)}/items/${encodeURIComponent(item.item_id)}/retry`),
+        { method: "POST" },
+      );
+      const payload = (await res.json().catch(() => null)) as BulkImportResponse | null;
+      if (!res.ok || payload?.ok === false) {
+        throw new Error(payload?.detail || payload?.message || payload?.error || `Relance impossible (${res.status})`);
+      }
+      if (payload?.batch) setBatch(payload.batch);
+      if (payload?.requires_file_upload) await uploadItemFile(item);
+      void refreshBatch(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur inconnue pendant la relance.");
+    }
+  };
+
+  const toggleImportSelected = (itemId: string) => {
+    const item = items.find((candidate) => candidate.item_id === itemId);
+    if (!item || !bulkItemCanBeSelected(item)) return;
+    setImportSelected((current) => {
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      return next;
+    });
+  };
+
+  const selectVisibleForImport = () => {
+    setImportSelected((current) => new Set([...current, ...visibleSelectableItems.map((item) => item.item_id)]));
+  };
+
+  const deselectVisibleForImport = () => {
+    setImportSelected((current) => {
+      const next = new Set(current);
+      visibleSelectableItems.forEach((item) => next.delete(item.item_id));
+      return next;
+    });
+  };
+
+  const excludeSelectedFromImport = async () => {
+    const targetItems = items.filter((item) => importSelected.has(item.item_id) && bulkReviewStatus(item.review_status) !== "IGNORED");
+    setImportSelected((current) => {
+      const next = new Set(current);
+      targetItems.forEach((item) => next.delete(item.item_id));
+      return next;
+    });
+    await patchItems(targetItems.map((item) => ({ item_id: item.item_id, review_status: "EXCLUDED" })));
+  };
+
+  const reincludeItem = async (item: BulkImportItem) => {
+    const nextStatus = bulkReincludeStatus(item);
+    setImportSelected((current) => new Set(current).add(item.item_id));
+    await patchItems([{ item_id: item.item_id, review_status: nextStatus }]);
+  };
+
+  if (step === "scan") {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6 bg-slate-50 p-8">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-100">
+          <Loader2 className="h-6 w-6 animate-spin text-orange-600" />
+        </div>
+        <div className="text-center">
+          <p className="font-semibold text-slate-900">Analyse du dossier en cours...</p>
+          <p className="mt-1 text-sm text-slate-500">Scan récursif · Manifest documentaire · Préparation review</p>
+        </div>
+        <div className="flex max-h-52 min-w-[360px] flex-col gap-1.5 overflow-y-auto rounded-xl border border-slate-200 bg-white p-4 font-mono text-xs text-slate-500">
+          {scanLines.length ? scanLines.map((line) => (
+            <p key={line} className="flex items-center gap-2">
+              <Check className="h-3 w-3 shrink-0 text-emerald-500" />
+              {line}
+            </p>
+          )) : <p className="text-slate-400">Lecture du dossier...</p>}
+        </div>
+        {error ? <ErrorBox>{error}</ErrorBox> : null}
+        {busy ? <p className="text-xs text-slate-400">Création de la session de vérification...</p> : null}
+      </div>
+    );
+  }
+
+  if (step === "summary") {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6 bg-slate-50 p-10">
+        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-100">
+          <Check className="h-6 w-6 text-emerald-600" />
+        </div>
+        <div className="text-center">
+          <p className="font-semibold text-slate-900">{counts.total ?? items.length} fichiers détectés</p>
+          <p className="mt-1 text-sm text-slate-500">Dossier : <span className="font-mono text-slate-700">{batch?.root_name || rootName}</span></p>
+        </div>
+        <div className="grid grid-cols-4 gap-3 text-center text-sm">
+          {[
+            [counts.ready ?? 0, "Prêts", "border-emerald-200 bg-emerald-50 text-emerald-700"],
+            [counts.check ?? 0, "À vérifier", "border-amber-200 bg-amber-50 text-amber-700"],
+            [counts.duplicate ?? 0, "Doublons", "border-orange-200 bg-orange-50 text-orange-700"],
+            [counts.ignored ?? 0, "Ignorés", "border-slate-200 bg-slate-100 text-slate-500"],
+          ].map(([value, label, cls]) => (
+            <div key={String(label)} className={cx("rounded-xl border px-5 py-3 font-semibold", String(cls))}>
+              <p className="text-xl font-bold">{String(value)}</p>
+              <p className="mt-0.5 text-xs">{String(label)}</p>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-3">
+          <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-600 hover:bg-slate-100">Annuler</button>
+          <button type="button" onClick={() => setStep("review")} className="inline-flex items-center gap-2 rounded-xl bg-orange-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-orange-700">
+            Vérifier les fichiers →
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === "pipeline" || step === "done") {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="border-b border-slate-200 bg-white px-6 py-4">
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="font-semibold text-slate-900">{step === "done" ? "Import terminé" : "Import en cours..."}</p>
+              <p className="mt-0.5 text-xs text-slate-500">
+                {counts.indexed ?? 0} indexé{(counts.indexed ?? 0) > 1 ? "s" : ""} · {counts.running ?? 0} en cours · {counts.failed ?? 0} échec{(counts.failed ?? 0) > 1 ? "s" : ""}
+              </p>
+            </div>
+            {step === "done" ? (
+              <button type="button" onClick={onDone} className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">
+                <Check className="h-4 w-4" />
+                Terminer
+              </button>
+            ) : null}
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+            <div className="h-full rounded-full bg-orange-500 transition-all duration-300" style={{ width: `${progress}%` }} />
+          </div>
+          <div className="mt-1.5 flex justify-between text-xs text-slate-400">
+            <span>{progress}%</span>
+            <span>{doneCount} / {acceptedCount} traités</span>
+          </div>
+          {error ? <div className="mt-3"><ErrorBox>{error}</ErrorBox></div> : null}
+        </div>
+        <div className="flex-1 overflow-auto bg-slate-50">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 border-b border-slate-200 bg-white">
+              <tr>
+                <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Fichier</th>
+                {bulkPipelineSteps.map((s) => <th key={s.key} className="w-36 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-500">{s.label}</th>)}
+                <th className="w-32 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide text-slate-500">Résultat</th>
+                <th className="w-24 px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {pipelineItems.map((item) => {
+                const label = bulkOverallLabel(item);
+                const failed = label.label === "Échec";
+                return (
+                  <tr key={item.item_id} className={cx("bg-white", failed && "bg-red-50/40")}>
+                    <td className="px-5 py-3">
+                      <div className="flex items-center gap-2">
+                        <FileText className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                        <div>
+                          <p className="text-xs font-medium text-slate-900">{bulkItemFilename(item)}</p>
+                          <p className="mt-0.5 font-mono text-[10px] text-slate-400">{bulkItemPath(item)}</p>
+                        </div>
+                      </div>
+                    </td>
+                    {bulkPipelineSteps.map((s) => {
+                      const status = bulkPipelineStatus(item.pipeline?.[s.key]);
+                      return (
+                        <td key={s.key} className="px-4 py-3">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <BulkPipelineStepIcon status={status} />
+                            <span className={cx("text-xs", status === "DONE" && "text-emerald-600", status === "FAILED" && "text-red-600", status === "RUNNING" && "text-blue-600", status === "PENDING" && "text-slate-400")}>
+                              {status === "DONE" ? "OK" : status === "RUNNING" ? "..." : status === "FAILED" ? "Échec" : "-"}
+                            </span>
+                          </div>
+                        </td>
+                      );
+                    })}
+                    <td className="px-4 py-3">
+                      <div className="flex justify-center">
+                        <span className={cx("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold", label.cls)}>{label.label}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {failed ? (
+                        <button type="button" onClick={() => void retryItem(item)} className="inline-flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-700">
+                          <RotateCcw className="h-3 w-3" />
+                          Relancer
+                        </button>
+                      ) : uploadingIds.has(item.item_id) ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  const tabs: Array<{ id: BulkReviewStatus | "ALL"; label: string; count: number; color: string }> = [
+    { id: "ALL", label: "Tous", count: items.filter((i) => bulkReviewStatus(i.review_status) !== "IGNORED").length, color: "text-slate-600" },
+    { id: "READY", label: "Prêts", count: counts.ready ?? 0, color: "text-emerald-700" },
+    { id: "CHECK", label: "À vérifier", count: counts.check ?? 0, color: "text-amber-700" },
+    { id: "DUPLICATE", label: "Doublons", count: counts.duplicate ?? 0, color: "text-orange-700" },
+    { id: "EXCLUDED", label: "Exclus", count: counts.excluded ?? items.filter((i) => bulkReviewStatus(i.review_status) === "EXCLUDED").length, color: "text-slate-500" },
+    { id: "IGNORED", label: "Ignorés auto", count: counts.ignored ?? 0, color: "text-slate-400" },
+  ];
+  const selectedItems = items.filter((item) => importSelected.has(item.item_id));
+  const hasImportSelection = importSelected.size > 0;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4">
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><ChevronRight className="h-4 w-4 rotate-180" /></button>
+          <div>
+            <div className="flex items-center gap-2">
+              <p className="font-semibold text-slate-900">Vérification avant import</p>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">{counts.total ?? items.length} fichiers détectés</span>
+            </div>
+            <p className="mt-0.5 text-xs text-slate-500">Dossier : <span className="font-mono text-slate-700">{batch?.root_name || rootName}</span></p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className={cx("flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold", hasImportSelection ? "border-orange-200 bg-orange-50 text-orange-800" : "border-slate-200 bg-slate-100 text-slate-400")}>
+            <Check className={cx("h-3.5 w-3.5", hasImportSelection ? "text-orange-600" : "text-slate-300")} />
+            {reviewImportItems.length} fichier{reviewImportItems.length > 1 ? "s" : ""} sélectionné{reviewImportItems.length > 1 ? "s" : ""} pour import
+          </div>
+          <button type="button" onClick={() => void launchPipeline()} disabled={busy || !hasImportSelection} className="inline-flex items-center gap-2 rounded-xl bg-orange-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-orange-700 disabled:bg-slate-300">
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            Lancer l&apos;import ({reviewImportItems.length})
+          </button>
+        </div>
+      </div>
+
+      {importSelected.size > 0 ? (
+        <div className="flex items-center gap-4 bg-slate-900 px-6 py-3 text-white">
+          <span className="text-sm font-semibold">{importSelected.size} fichier{importSelected.size > 1 ? "s" : ""} sélectionné{importSelected.size > 1 ? "s" : ""}</span>
+          <select value={bulkProduct} onChange={(e) => setBulkProduct(e.target.value)} className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white">
+            <option value="">Produit...</option>
+            {productOptions.map((p) => <option key={p.code} value={p.code}>{p.label}</option>)}
+          </select>
+          <select value={bulkType} onChange={(e) => setBulkType(e.target.value)} className="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-sm text-white">
+            <option value="">Type...</option>
+            {documentTypeOptions.map((t) => <option key={t.code} value={t.code}>{t.label}</option>)}
+          </select>
+          <button type="button" onClick={() => {
+            void patchItems(selectedItems.map((item) => ({ item_id: item.item_id, ...(bulkProduct ? { product_code: bulkProduct } : {}), ...(bulkType ? { document_type: bulkType } : {}) })));
+            setBulkProduct("");
+            setBulkType("");
+          }} disabled={!bulkProduct && !bulkType} className="rounded-lg bg-orange-500 px-3 py-1.5 text-sm font-semibold hover:bg-orange-400 disabled:opacity-50">Appliquer</button>
+          <span className="h-5 w-px bg-white/20" />
+          <button type="button" onClick={() => void excludeSelectedFromImport()} className="inline-flex items-center gap-1.5 rounded-lg border border-white/20 px-3 py-1.5 text-sm text-white/80 hover:bg-white/10 hover:text-white">
+            <X className="h-3.5 w-3.5" />
+            Exclure de l&apos;import
+          </button>
+          <button type="button" onClick={() => setImportSelected(new Set())} className="ml-auto text-white/60 hover:text-white"><X className="h-4 w-4" /></button>
+        </div>
+      ) : null}
+
+      <div className="flex gap-1 border-b border-slate-200 bg-white px-6">
+        {tabs.map((tab) => (
+          <button key={tab.id} type="button" onClick={() => setActiveFilter(tab.id)} className={cx("flex items-center gap-1.5 border-b-2 px-3 py-3 text-sm font-medium", activeFilter === tab.id ? "border-orange-500 text-orange-700" : `border-transparent ${tab.color} hover:text-slate-700`)}>
+            {tab.label}
+            <span className={cx("rounded-full px-1.5 py-0.5 text-xs font-bold", activeFilter === tab.id ? "bg-orange-100 text-orange-700" : "bg-slate-100 text-slate-500")}>{tab.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {error ? <div className="px-6 py-3"><ErrorBox>{error}</ErrorBox></div> : null}
+
+      <div className="flex-1 overflow-auto bg-slate-50">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 border-b border-slate-200 bg-white">
+            <tr>
+              <th className="w-10 px-4 py-3">
+                <input ref={headerCheckboxRef} type="checkbox" onChange={(e) => e.target.checked ? selectVisibleForImport() : deselectVisibleForImport()} checked={allVisibleSelected} disabled={visibleSelectableItems.length === 0} className="rounded accent-orange-600 disabled:opacity-30" title="Sélectionner / désélectionner les fichiers visibles" />
+              </th>
+              <th className="px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Fichier</th>
+              <th className="w-44 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Produit</th>
+              <th className="w-40 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Type</th>
+              <th className="w-28 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Version</th>
+              <th className="w-32 px-3 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Statut</th>
+              <th className="w-12 px-3 py-3" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {filteredItems.map((item) => {
+              const selected = importSelected.has(item.item_id);
+              const editing = editingId === item.item_id;
+              const review = bulkReviewStatus(item.review_status);
+              const metadata = item.metadata || {};
+              const ignored = review === "IGNORED";
+              const excluded = review === "EXCLUDED";
+              const dimmed = ignored || excluded;
+              return (
+                <tr key={item.item_id} className={cx("bg-white hover:bg-slate-50/80", selected && "bg-orange-50/50", dimmed && "bg-slate-50/70")}>
+                  <td className="px-4 py-3"><input type="checkbox" checked={selected} disabled={ignored} onChange={() => excluded ? void reincludeItem(item) : toggleImportSelected(item.item_id)} className="rounded accent-orange-600 disabled:opacity-30" title={ignored ? "Fichier ignoré automatiquement" : excluded ? "Réinclure" : undefined} /></td>
+                  <td className="px-3 py-3">
+                    <div className={cx("flex items-start gap-2", dimmed && "opacity-50")}>
+                      <FileText className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                      <div>
+                        <p className={cx("text-xs font-medium leading-snug", excluded ? "text-slate-400 line-through" : "text-slate-900")}>{bulkItemFilename(item)}</p>
+                        <p className="mt-0.5 font-mono text-[10px] text-slate-400">{bulkItemPath(item)}</p>
+                        {metadata.tags?.length ? <div className="mt-1 flex flex-wrap gap-1">{metadata.tags.map((tag) => <span key={tag} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">{tag}</span>)}</div> : null}
+                      </div>
+                    </div>
+                  </td>
+                  <td className={cx("px-3 py-3", dimmed && "opacity-40")}>{editing && !dimmed ? <select value={safeStr(metadata.product_code)} onChange={(e) => void patchItems([{ item_id: item.item_id, product_code: e.target.value }])} className="w-full rounded border border-slate-200 px-2 py-1.5 text-xs"><option value="">—</option>{productOptions.map((p) => <option key={p.code} value={p.code}>{p.label}</option>)}</select> : <span className={cx("text-xs font-semibold", metadata.product_code ? "text-orange-700" : "text-slate-300 italic")}>{metadata.product_label || (metadata.product_code ? productLabel(metadata.product_code) : "—")}</span>}</td>
+                  <td className={cx("px-3 py-3", dimmed && "opacity-40")}>{editing && !dimmed ? <select value={safeStr(metadata.document_type)} onChange={(e) => void patchItems([{ item_id: item.item_id, document_type: e.target.value }])} className="w-full rounded border border-slate-200 px-2 py-1.5 text-xs"><option value="">—</option>{documentTypeOptions.map((t) => <option key={t.code} value={t.code}>{t.label}</option>)}</select> : <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">{humanLabel(metadata.document_type)}</span>}</td>
+                  <td className={cx("px-3 py-3", dimmed && "opacity-40")}>{editing && !dimmed ? <input defaultValue={safeStr(metadata.version)} onBlur={(e) => void patchItems([{ item_id: item.item_id, version: e.target.value }])} className="w-full rounded border border-slate-200 px-2 py-1.5 font-mono text-xs" /> : <span className="font-mono text-xs text-slate-500">{metadata.version || "—"}</span>}</td>
+                  <td className="px-3 py-3">{editing && !dimmed ? <select value={review} onChange={(e) => void patchItems([{ item_id: item.item_id, review_status: e.target.value }])} className="w-full rounded border border-slate-200 px-2 py-1.5 text-xs">{Object.entries(bulkReviewLabels).map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select> : <span className={cx("inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold", bulkReviewClasses[review])}>{bulkReviewLabels[review]}</span>}</td>
+                  <td className="px-3 py-3">
+                    <div className="flex items-center justify-end gap-1.5">
+                      {excluded ? (
+                        <button type="button" onClick={() => void reincludeItem(item)} className="inline-flex items-center gap-1 whitespace-nowrap text-xs font-medium text-slate-500 hover:text-orange-600">
+                          <RotateCcw className="h-3 w-3" />
+                          Réinclure
+                        </button>
+                      ) : !ignored ? (
+                        <button type="button" onClick={() => setEditingId(editing ? null : item.item_id)} className={cx("rounded p-1.5", editing ? "bg-orange-100 text-orange-700" : "text-slate-400 hover:bg-slate-100")}><Save className="h-3.5 w-3.5" /></button>
+                      ) : null}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [catalog, setCatalog] = useState<ProductDocumentCatalog | null>(null);
   const [documents, setDocuments] = useState<ProductDocument[]>([]);
@@ -775,6 +1564,10 @@ export default function SettingsPage() {
   const [editTagDraft, setEditTagDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkFiles, setBulkFiles] = useState<File[]>([]);
+  const [bulkRootName, setBulkRootName] = useState("");
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const documentTypeOptions = useMemo(
     () => normalizeOptions(catalog?.document_types),
@@ -972,6 +1765,31 @@ export default function SettingsPage() {
   const openAdd = () => {
     resetAdd();
     setAddOpen(true);
+  };
+
+  const openBulkFolderPicker = () => {
+    if (folderInputRef.current) folderInputRef.current.value = "";
+    folderInputRef.current?.click();
+  };
+
+  const handleBulkFolderSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(event.target.files || []);
+    if (!selectedFiles.length) return;
+    const firstPath = safeStr((selectedFiles[0] as File & { webkitRelativePath?: string }).webkitRelativePath || selectedFiles[0].name);
+    setBulkRootName(firstPath.includes("/") ? firstPath.split("/")[0] : "Dossier sélectionné");
+    setBulkFiles(selectedFiles);
+    setBulkOpen(true);
+  };
+
+  const closeBulkImport = () => {
+    setBulkOpen(false);
+    setBulkFiles([]);
+    setBulkRootName("");
+  };
+
+  const finishBulkImport = () => {
+    closeBulkImport();
+    void refresh();
   };
 
   const openEdit = () => {
@@ -1297,6 +2115,14 @@ export default function SettingsPage() {
             </div>
 
             <div className="flex items-center gap-3">
+              <input
+                ref={folderInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleBulkFolderSelected}
+                {...{ webkitdirectory: "", directory: "" }}
+              />
               <button
                 type="button"
                 onClick={() => void refresh()}
@@ -1305,6 +2131,15 @@ export default function SettingsPage() {
                 title="Actualiser"
               >
                 <RefreshCw className={cx("h-4 w-4", refreshing && "animate-spin")} />
+              </button>
+
+              <button
+                type="button"
+                onClick={openBulkFolderPicker}
+                className="inline-flex h-11 items-center gap-2 rounded-xl border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
+              >
+                <Upload className="h-4 w-4" />
+                Importer un dossier
               </button>
 
               <button
@@ -1327,6 +2162,15 @@ export default function SettingsPage() {
           <div className="p-8">
             <ErrorBox>{error}</ErrorBox>
           </div>
+        ) : bulkOpen && bulkFiles.length ? (
+          <BulkImportMode
+            files={bulkFiles}
+            rootName={bulkRootName}
+            productOptions={productOptions}
+            documentTypeOptions={documentTypeOptions}
+            onClose={closeBulkImport}
+            onDone={finishBulkImport}
+          />
         ) : (
           <div className="grid min-h-0 flex-1 grid-cols-[330px_minmax(0,1fr)_360px] overflow-hidden">
             <aside className="flex min-h-0 flex-col border-r border-slate-200 bg-white">
