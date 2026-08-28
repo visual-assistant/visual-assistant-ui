@@ -220,6 +220,115 @@ Contrats importants cote UI :
 - garder les propositions IA modifiables par le service technique;
 - ne pas casser les anciens liens publics `/r/[slug]` et `/session_sav/[slug]`.
 
+## Guide chantier
+
+Une premiere interface service technique existe pour relire et ajuster un guide chantier genere par PRIA.
+
+Point d'entree de generation :
+
+```text
+/atelier -> mode Preparer un guide chantier
+```
+
+Flow Atelier implemente :
+
+- deux modes dans l'Atelier : `Question Atelier` et `Preparer un guide chantier`;
+- cas chantier existant : saisie d'une reference/ID, chargement via `GET /chantiers/{chantier_id}`, puis pre-remplissage reference, produit, installateur et configuration;
+- cas nouveau chantier : formulaire minimal reference/client, installateur, telephone, email, produit et configuration libre;
+- pour un nouveau chantier, creation via `POST /chantiers/{chantier_id}` avant generation du guide;
+- champ central unique `Description de la configuration`, sans matrice ni traits techniques;
+- bouton `Analyser la configuration` ouvrant une modale de confirmation simple : chantier, produit, installateur, configuration saisie;
+- bouton `Generer le guide` appelant `POST /guides` avec `generate_points: true` et `guide_point_max_points: 25`;
+- apres succes, redirection directe vers `/sav/sessions/{chantier_id}?tab=GUIDE`;
+- aucune review GuidePoints n'est affichee dans l'Atelier.
+
+Route principale cote service technique :
+
+```text
+/sav/sessions/[sessions_id] -> tab Guide chantier
+```
+
+Route secondaire technique/debug :
+
+```text
+/guides/[guide_id]
+```
+
+Point d'entree depuis le detail chantier :
+
+- la page `/sav/sessions/[sessions_id]` contient maintenant un tab `Guide chantier`;
+- ce tab appelle `GET /guides?chantier_id={chantier_id}` pour retrouver les guides rattaches au chantier;
+- le backend retourne normalement les guides tries par `updated_at` puis `created_at` decroissant, donc le tab utilise `items[0]` comme guide principal;
+- le tab garde `collectGuideIds(chantier)` seulement comme fallback compatible avec d'anciens formats (`guide_id`, `guide.guide_id`, `latest_guide_id`, `guide_ids`, `guides[]`, `prevention.guides[]`);
+- si un guide est trouve, la revue des GuidePoints s'affiche directement dans l'onglet, sans etape intermediaire ni navigation vers une autre page;
+- si aucun guide n'est retourne, il affiche l'etat vide `Aucun guide chantier genere pour ce chantier`.
+
+Contrat backend utilise pour l'etape 1 :
+
+```http
+GET /guides?chantier_id={chantier_id}
+POST /chantiers/{chantier_id}
+POST /guides
+GET /guides/{guide_id}
+GET /guides/{guide_id}/points
+PATCH /guides/{guide_id}/points/{point_id}
+POST /guides/{guide_id}/corrections
+POST /guides/{guide_id}/review/approve
+```
+
+Fonctionnalites implementees :
+
+- header guide avec statut, chantier, produit et installateur quand disponibles;
+- `GuideChantierReview` est un composant partage utilise dans l'onglet chantier et par la route secondaire `/guides/[guide_id]`;
+- le composant charge le guide via `/guides/{guide_id}`, puis charge le chantier via `/chantiers/{chantier_id}` pour afficher l'installateur;
+- la configuration affichee vient de `guide.configuration_snapshot.configuration_text`;
+- le header et les onglets `Chantier Detail` sont factorises dans `src/components/ChantierDetailHeaderTabs.tsx`;
+- la page `/sav/sessions/[sessions_id]` lit le parametre `tab` pour ouvrir directement `Info Chantier`, `Session SAV`, `Guide chantier` ou `Messages recus`;
+- points groupes par timing puis domaine;
+- timings GuidePoint affiches cote service technique : `before_work`, `during_work`, `startup_or_delivery`, `maintenance`, `troubleshooting`;
+- les contacts PERGE ne sont pas des GuidePoints et ne sont pas affiches comme timing administratif dans la revue service technique;
+- mapping placements `main` / `secondary` / `hidden` vers Principal / Secondaire / Masque;
+- modification rapide du placement depuis une carte;
+- modal `Ajuster ce point` pour modifier title, content, detail, timing, domaine, placement et note de revue;
+- option de correction reutilisable pour les prochains guides via instruction libre;
+- drawer `Sources` avec document, section/ancre, page, extrait et lien vers extrait visuel si disponible;
+- validation du guide via `/review/approve`;
+- colonne laterale cycle de vie, suivi installateur sobre, informations chantier et reperes.
+- preview installateur via `GET /guides/{guide_id}/installer-preview`;
+- modal `Apercu installateur` inspiree FigmaMake v13, accessible depuis `GuideChantierReview`;
+- la preview affiche uniquement les timings qui ont des points visibles;
+- la preview groupe par timing puis domaine, affiche les points `main` normalement et les points `secondary` dans `A garder en tete`;
+- la preview n'affiche jamais les points `hidden`;
+- les contacts PERGE de `administrative_contacts` sont affiches dans un bloc separe, jamais comme timing administratif;
+- les sources exploitables des points preview sont visibles avec lien vers extrait visuel si disponible.
+
+Ce qui n'est pas encore implemente :
+
+- page publique finale ou slug public;
+- envoi WhatsApp/email;
+- tracking installateur vu/fait/question/photo;
+- ajout manuel de point, le bouton est seulement present visuellement et desactive.
+
+Etape 2 realisee :
+
+1. Brancher `GET /guides/{guide_id}/installer-preview`.
+2. Ajouter une modal `Apercu installateur` depuis `GuideChantierReview`, donc accessible dans l'onglet chantier et dans `/guides/[guide_id]`.
+3. Reproduire l'esprit FigmaMake v13 `GuideChantierWebapp` avec navigation par timing puis domaine.
+4. Afficher les points `main` normalement.
+5. Afficher les points `secondary` dans une section discrete `A garder en tete`.
+6. Ne jamais afficher les points `hidden`.
+7. Afficher les sources exploitables par point si elles sont dans le payload preview.
+8. Garder les actions installateur interactives comme placeholders non branches.
+
+Verification faite lors de l'ajout :
+
+```bash
+npx eslint src\app\guides\[guide_id]\page.tsx
+npm run build
+```
+
+Note : `npm run lint` global peut encore echouer sur des erreurs legacy preexistantes dans d'autres pages (`generateur`, `inbox-sav`, `sav/sessions`, etc.). La nouvelle route Guide chantier passe le lint cible et le build complet.
+
 ## Principes UI
 
 - Garder une interface SAV claire, dense et operationnelle.

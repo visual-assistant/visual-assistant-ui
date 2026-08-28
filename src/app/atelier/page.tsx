@@ -5,6 +5,7 @@ import {
   AlertCircle,
   ArrowRight,
   AlertTriangle,
+  BookOpen,
   ChevronDown,
   Check,
   Clock3,
@@ -22,7 +23,9 @@ import {
   Send,
   Sparkles,
   X,
+  Zap,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
 
 const API_BASE =
@@ -248,6 +251,61 @@ type AtelierProductsResponse =
       data?: AtelierProduct[];
       products?: AtelierProduct[];
     };
+
+type GuidePreparationMode = "existing" | "new";
+type GuidePreparationStep = "setup" | "confirm" | "generating";
+
+type GuideChantierContext = {
+  reference_chantier?: string | null;
+  produit?: string | null;
+  configuration_text?: string | null;
+  installateur?: {
+    source?: string | null;
+    company?: string | null;
+    name?: string | null;
+    phone?: string | null;
+    email?: string | null;
+  } | null;
+};
+
+type GuideChantierDetail = {
+  chantier_id?: string | null;
+  id?: string | null;
+  title?: string | null;
+  context?: GuideChantierContext | null;
+};
+
+type GuideCreationResponse = {
+  ok?: boolean;
+  guide?: {
+    guide_id?: string | null;
+    chantier_id?: string | null;
+    status?: string | null;
+    configuration_snapshot?: {
+      configuration_text?: string | null;
+    } | null;
+  } | null;
+  points_generation?: {
+    requested?: boolean | null;
+    ok?: boolean | null;
+    count?: number | null;
+    error?: string | null;
+  } | null;
+  detail?: string | null;
+  message?: string | null;
+  error?: string | null;
+};
+
+type GuidePreparationForm = {
+  chantierId: string;
+  reference: string;
+  installerCompany: string;
+  installerName: string;
+  installerPhone: string;
+  installerEmail: string;
+  product: string;
+  configurationText: string;
+};
 
 type AtelierQuestion = {
   question_id: string;
@@ -1155,7 +1213,521 @@ function SharePanel({
   );
 }
 
+function chantierIdFromReference(reference: string) {
+  const normalized = reference
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized || `CHANTIER_${Date.now()}`;
+}
+
+function productCodeForGuide(product: string, indexedProducts: AtelierProduct[]) {
+  const value = safeStr(product);
+  if (!value) return "";
+  const exact = indexedProducts.find(
+    (item) =>
+      item.product_code.toLowerCase() === value.toLowerCase() ||
+      safeStr(item.product_label).toLowerCase() === value.toLowerCase(),
+  );
+  return exact?.product_code || value;
+}
+
+function guideBackendError(status: number, payload: GuideCreationResponse | null, fallback: string) {
+  const message = safeStr(payload?.detail || payload?.message || payload?.error);
+  if (message) return message;
+  if (status === 404) return "Chantier introuvable.";
+  if (status === 400) return "Champs requis manquants ou invalides.";
+  return fallback;
+}
+
+function GuidePreparationPanel({
+  indexedProducts,
+  onOpenGuideReview,
+}: {
+  indexedProducts: AtelierProduct[];
+  onOpenGuideReview: (chantierId: string) => void;
+}) {
+  const [mode, setMode] = useState<GuidePreparationMode>("existing");
+  const [step, setStep] = useState<GuidePreparationStep>("setup");
+  const [form, setForm] = useState<GuidePreparationForm>({
+    chantierId: "",
+    reference: "",
+    installerCompany: "",
+    installerName: "",
+    installerPhone: "",
+    installerEmail: "",
+    product: "",
+    configurationText: "",
+  });
+  const [existingSearch, setExistingSearch] = useState("");
+  const [selectedChantier, setSelectedChantier] = useState<GuideChantierDetail | null>(null);
+  const [isLoadingChantier, setIsLoadingChantier] = useState(false);
+  const [isGeneratingGuide, setIsGeneratingGuide] = useState(false);
+  const [progressStep, setProgressStep] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  const updateForm = (patch: Partial<GuidePreparationForm>) => {
+    setForm((current) => ({ ...current, ...patch }));
+  };
+
+  const resetForMode = (nextMode: GuidePreparationMode) => {
+    setMode(nextMode);
+    setStep("setup");
+    setError(null);
+    setWarning(null);
+    setSelectedChantier(null);
+    setExistingSearch("");
+    setForm({
+      chantierId: "",
+      reference: "",
+      installerCompany: "",
+      installerName: "",
+      installerPhone: "",
+      installerEmail: "",
+      product: "",
+      configurationText: "",
+    });
+  };
+
+  const hydrateFromChantier = (chantier: GuideChantierDetail, chantierId: string) => {
+    const context = chantier.context || {};
+    const installer = context.installateur || {};
+    updateForm({
+      chantierId: safeStr(chantier.chantier_id || chantier.id, chantierId),
+      reference: safeStr(context.reference_chantier) || safeStr(chantier.title) || chantierId,
+      product: safeStr(context.produit),
+      installerCompany: safeStr(installer.company),
+      installerName: safeStr(installer.name),
+      installerPhone: safeStr(installer.phone),
+      installerEmail: safeStr(installer.email),
+      configurationText: safeStr(context.configuration_text),
+    });
+  };
+
+  const loadExistingChantier = async () => {
+    const chantierId = existingSearch.trim();
+    if (!chantierId || isLoadingChantier) return;
+
+    setIsLoadingChantier(true);
+    setError(null);
+    setWarning(null);
+
+    try {
+      const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`), {
+        cache: "no-store",
+      });
+      const payload = (await res.json().catch(() => null)) as GuideChantierDetail & GuideCreationResponse | null;
+      if (!res.ok || !payload) {
+        throw new Error(guideBackendError(res.status, payload, "Impossible de charger ce chantier."));
+      }
+      setSelectedChantier(payload);
+      hydrateFromChantier(payload, chantierId);
+    } catch (err) {
+      setSelectedChantier(null);
+      setError(err instanceof Error ? err.message : "Impossible de charger ce chantier.");
+    } finally {
+      setIsLoadingChantier(false);
+    }
+  };
+
+  const canAnalyze =
+    safeStr(form.configurationText).length > 0 &&
+    safeStr(form.product).length > 0 &&
+    (mode === "existing" ? safeStr(form.chantierId).length > 0 : safeStr(form.reference).length > 0);
+
+  const generationSteps = [
+    "Création chantier",
+    "Génération du guide",
+    "Génération des points",
+    "Ouverture de la revue",
+  ];
+
+  const generateGuide = async () => {
+    if (!canAnalyze || isGeneratingGuide) return;
+
+    setIsGeneratingGuide(true);
+    setStep("generating");
+    setProgressStep(0);
+    setError(null);
+    setWarning(null);
+
+    try {
+      const chantierId =
+        mode === "existing"
+          ? safeStr(form.chantierId)
+          : chantierIdFromReference(form.reference);
+
+      if (mode === "new") {
+        const chantierRes = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantierId)}`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            actor: "Service technique",
+            context: {
+              reference_chantier: form.reference.trim(),
+              produit: form.product.trim(),
+              configuration_text: form.configurationText.trim(),
+              installateur: {
+                source: "manual",
+                company: form.installerCompany.trim(),
+                name: form.installerName.trim(),
+                phone: form.installerPhone.trim(),
+                email: form.installerEmail.trim(),
+              },
+            },
+          }),
+        });
+        const chantierPayload = (await chantierRes.json().catch(() => null)) as GuideCreationResponse | null;
+        if (!chantierRes.ok) {
+          throw new Error(guideBackendError(chantierRes.status, chantierPayload, "Création chantier impossible."));
+        }
+      }
+
+      setProgressStep(1);
+      const product = productCodeForGuide(form.product, indexedProducts);
+      const guideRes = await fetch(buildUrl("/guides"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chantier_id: chantierId,
+          products: [product],
+          configuration_text: form.configurationText.trim(),
+          title: `Guide chantier ${form.reference.trim() || chantierId}`,
+          actor: "Service technique",
+          generate_points: true,
+          guide_point_max_points: 25,
+        }),
+      });
+
+      const guidePayload = (await guideRes.json().catch(() => null)) as GuideCreationResponse | null;
+      if (!guideRes.ok || guidePayload?.ok === false) {
+        throw new Error(guideBackendError(guideRes.status, guidePayload, "Génération du guide impossible."));
+      }
+
+      setProgressStep(2);
+      if (guidePayload?.points_generation?.ok === false) {
+        setWarning(
+          safeStr(guidePayload.points_generation.error) ||
+            "Le guide a été créé, mais la génération des points n'a pas abouti.",
+        );
+      }
+
+      setProgressStep(3);
+      onOpenGuideReview(safeStr(guidePayload?.guide?.chantier_id, chantierId));
+    } catch (err) {
+      setStep("setup");
+      setError(err instanceof Error ? err.message : "Génération impossible.");
+    } finally {
+      setIsGeneratingGuide(false);
+    }
+  };
+
+  if (step === "generating") {
+    return (
+      <div className="mx-auto max-w-2xl px-8 py-8">
+        <div className="flex flex-col items-center gap-6 rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-100">
+            <Sparkles className="h-6 w-6 animate-pulse text-orange-600" />
+          </div>
+          <div className="text-center">
+            <p className="font-semibold text-slate-950">Génération du guide en cours...</p>
+            <p className="mt-1 text-sm text-slate-500">PRIA prépare le guide chantier et ses points de revue.</p>
+          </div>
+          <div className="w-full max-w-sm space-y-2">
+            {generationSteps.map((label, index) => {
+              const skipped = mode === "existing" && index === 0;
+              const done = skipped || progressStep > index;
+              const active = progressStep === index && !skipped;
+              return (
+                <div
+                  key={label}
+                  className={[
+                    "flex items-center gap-3 rounded-lg border p-3 transition",
+                    done
+                      ? "border-emerald-200 bg-emerald-50"
+                      : active
+                        ? "border-orange-200 bg-orange-50"
+                        : "border-slate-100 bg-slate-50",
+                  ].join(" ")}
+                >
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-white">
+                    {done ? (
+                      <Check className="h-4 w-4 text-emerald-500" />
+                    ) : active ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-orange-500" />
+                    ) : (
+                      <span className="text-xs font-bold text-slate-300">{index + 1}</span>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className={["text-sm font-medium", done ? "text-emerald-800" : active ? "text-orange-800" : "text-slate-400"].join(" ")}>
+                      {label}
+                    </p>
+                    {skipped ? <p className="text-xs text-emerald-600">Chantier existant sélectionné</p> : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {warning ? (
+            <div className="w-full max-w-sm rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {warning}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl px-8 py-8">
+      <div className="mb-5 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-950">Préparer un guide chantier</h2>
+          <p className="mt-1 text-sm text-slate-500">Sélectionnez un chantier ou créez un contexte minimal avant génération.</p>
+        </div>
+        <span className="rounded-full border border-orange-200 bg-orange-50 px-3 py-1 text-xs font-semibold text-orange-700">
+          Guide draft
+        </span>
+      </div>
+
+      <div className="space-y-5">
+        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {([
+              ["existing", "Chantier existant", "Utiliser le contexte chantier déjà enregistré."],
+              ["new", "Nouveau chantier", "Créer un chantier minimal avant génération."],
+            ] as Array<[GuidePreparationMode, string, string]>).map(([key, title, description]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => resetForMode(key)}
+                className={[
+                  "rounded-xl border p-4 text-left transition",
+                  mode === key ? "border-orange-300 bg-orange-50" : "border-slate-200 hover:bg-slate-50",
+                ].join(" ")}
+              >
+                <p className="text-sm font-semibold text-slate-950">{title}</p>
+                <p className="mt-1 text-xs leading-relaxed text-slate-500">{description}</p>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {mode === "existing" ? (
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">Sélectionner le chantier</p>
+            <div className="flex gap-2">
+              <input
+                value={existingSearch}
+                onChange={(event) => setExistingSearch(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void loadExistingChantier();
+                }}
+                placeholder="Référence ou identifiant chantier"
+                className="h-11 flex-1 rounded-lg border border-slate-200 px-3.5 text-sm text-slate-900 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+              />
+              <button
+                type="button"
+                onClick={() => void loadExistingChantier()}
+                disabled={!existingSearch.trim() || isLoadingChantier}
+                className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {isLoadingChantier ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+                Charger
+              </button>
+            </div>
+            {selectedChantier ? (
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
+                Chantier chargé : <span className="font-semibold">{form.reference || form.chantierId}</span>
+              </div>
+            ) : null}
+          </section>
+        ) : (
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-slate-900">Informations du chantier</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Référence / client</span>
+                <input
+                  value={form.reference}
+                  onChange={(event) => updateForm({ reference: event.target.value })}
+                  placeholder="Ex: DUPONT"
+                  className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-orange-500"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Installateur société</span>
+                <input
+                  value={form.installerCompany}
+                  onChange={(event) => updateForm({ installerCompany: event.target.value })}
+                  placeholder="Ex: Martin Chauffage"
+                  className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-orange-500"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Téléphone installateur</span>
+                <input
+                  value={form.installerPhone}
+                  onChange={(event) => updateForm({ installerPhone: event.target.value })}
+                  placeholder="Optionnel"
+                  className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-orange-500"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Email installateur</span>
+                <input
+                  value={form.installerEmail}
+                  onChange={(event) => updateForm({ installerEmail: event.target.value })}
+                  placeholder="Optionnel"
+                  className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-orange-500"
+                />
+              </label>
+            </div>
+          </section>
+        )}
+
+        <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-slate-600">Produit / famille produit</span>
+              <input
+                value={form.product}
+                onChange={(event) => updateForm({ product: event.target.value })}
+                list="atelier-guide-products"
+                placeholder="Ex: PAC"
+                className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-orange-500"
+              />
+              <datalist id="atelier-guide-products">
+                {indexedProducts.map((product) => (
+                  <option key={product.product_code} value={product.product_code}>
+                    {productLabel(product)}
+                  </option>
+                ))}
+              </datalist>
+            </label>
+            {mode === "existing" ? (
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Installateur</span>
+                <input
+                  value={form.installerCompany || form.installerName}
+                  onChange={(event) => updateForm({ installerCompany: event.target.value })}
+                  placeholder="Installateur non renseigné"
+                  className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-orange-500"
+                />
+              </label>
+            ) : (
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Nom installateur</span>
+                <input
+                  value={form.installerName}
+                  onChange={(event) => updateForm({ installerName: event.target.value })}
+                  placeholder="Optionnel"
+                  className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-orange-500"
+                />
+              </label>
+            )}
+          </div>
+
+          <label className="block">
+            <span className="mb-1 block text-sm font-semibold text-slate-900">Description de la configuration</span>
+            <textarea
+              rows={6}
+              value={form.configurationText}
+              onChange={(event) => updateForm({ configurationText: event.target.value })}
+              placeholder="Décrire librement la configuration, les équipements, contraintes et points déjà connus."
+              className="min-h-36 w-full resize-y rounded-lg border border-slate-200 px-4 py-3 text-sm leading-6 text-slate-900 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+            />
+          </label>
+        </section>
+
+        {error ? (
+          <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+        ) : null}
+
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              setWarning(null);
+              setStep("confirm");
+            }}
+            disabled={!canAnalyze}
+            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+          >
+            <Zap className="h-4 w-4" />
+            Analyser la configuration
+          </button>
+        </div>
+      </div>
+
+      {step === "confirm" ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-xl overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-6 py-4">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Analyser la configuration</p>
+                <h3 className="mt-1 text-base font-semibold text-slate-950">Vérification avant génération</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStep("setup")}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Fermer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-3 px-6 py-5 text-sm">
+              {[
+                ["Chantier", form.reference || form.chantierId],
+                ["Produit", form.product],
+                ["Installateur", form.installerCompany || form.installerName || "Installateur non renseigné"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-xs font-medium text-slate-400">{label}</p>
+                  <p className="mt-1 font-semibold text-slate-900">{value}</p>
+                </div>
+              ))}
+              <div className="rounded-lg bg-slate-50 p-3">
+                <p className="text-xs font-medium text-slate-400">Configuration saisie</p>
+                <p className="mt-1 whitespace-pre-wrap leading-6 text-slate-800">{form.configurationText}</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setStep("setup")}
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                Corriger
+              </button>
+              <button
+                type="button"
+                onClick={() => void generateGuide()}
+                className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-5 py-2 text-sm font-semibold text-white hover:bg-orange-700"
+              >
+                <Zap className="h-4 w-4" />
+                Générer le guide
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function AtelierPage() {
+  const router = useRouter();
+  const [atelierMode, setAtelierMode] = useState<"question" | "guide">("question");
   const [questionText, setQuestionText] = useState("");
   const [currentQuestion, setCurrentQuestion] = useState<AtelierQuestion | null>(null);
   const [history, setHistory] = useState<AtelierQuestion[]>([]);
@@ -1664,13 +2236,17 @@ export default function AtelierPage() {
                   <Sparkles className="h-3.5 w-3.5" />
                   Atelier PRIA
                 </div>
-                <h1 className="text-2xl font-semibold text-slate-950">Demander à l&apos;Atelier</h1>
+                <h1 className="text-2xl font-semibold text-slate-950">
+                  {atelierMode === "guide" ? "Préparer un guide chantier" : "Demander à l'Atelier"}
+                </h1>
                 <p className="mt-1 max-w-2xl text-sm text-slate-500">
-                  Posez une question technique libre. L&apos;Atelier répond avec les sources documentaires produit et les extraits visuels disponibles.
+                  {atelierMode === "guide"
+                    ? "Préparez la configuration puis ouvrez la vraie revue service technique du chantier."
+                    : "Posez une question technique libre. L'Atelier répond avec les sources documentaires produit et les extraits visuels disponibles."}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {currentQuestion ? (
+                {atelierMode === "question" && currentQuestion ? (
                   <button
                     type="button"
                     onClick={startNewQuestion}
@@ -1680,26 +2256,62 @@ export default function AtelierPage() {
                     Nouvelle question
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsHistoryPanelOpen(true);
-                    void loadHistory();
-                  }}
-                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
-                >
-                  <PanelRightOpen className="h-4 w-4" />
-                  Historique
-                  {history.length ? (
-                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-bold text-slate-600">
-                      {history.length}
-                    </span>
-                  ) : null}
-                </button>
+                {atelierMode === "question" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsHistoryPanelOpen(true);
+                      void loadHistory();
+                    }}
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+                  >
+                    <PanelRightOpen className="h-4 w-4" />
+                    Historique
+                    {history.length ? (
+                      <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-bold text-slate-600">
+                        {history.length}
+                      </span>
+                    ) : null}
+                  </button>
+                ) : null}
               </div>
             </div>
 
-            {!currentQuestion ? (
+            <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+              {[
+                ["question", "Question Atelier", Sparkles],
+                ["guide", "Préparer un guide chantier", BookOpen],
+              ].map(([mode, label, Icon]) => {
+                const active = atelierMode === mode;
+                return (
+                  <button
+                    key={mode as string}
+                    type="button"
+                    onClick={() => {
+                      setAtelierMode(mode as "question" | "guide");
+                      setError(null);
+                      setIsHistoryPanelOpen(false);
+                    }}
+                    className={[
+                      "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition",
+                      active ? "bg-orange-600 text-white" : "text-slate-600 hover:bg-slate-50",
+                    ].join(" ")}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {label as string}
+                  </button>
+                );
+              })}
+            </div>
+
+            {atelierMode === "guide" ? (
+              <GuidePreparationPanel
+                indexedProducts={indexedProducts}
+                onOpenGuideReview={(chantierId) => {
+                  router.push(`/sav/sessions/${encodeURIComponent(chantierId)}?tab=GUIDE`);
+                }}
+              />
+            ) : !currentQuestion ? (
             <form onSubmit={submitQuestion} className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
               <label htmlFor="atelier-question" className="text-sm font-semibold text-slate-900">
                 Posez une question technique
@@ -1754,7 +2366,7 @@ export default function AtelierPage() {
             </form>
             ) : null}
 
-            {currentQuestion ? (
+            {atelierMode === "question" && currentQuestion ? (
               <div className="space-y-5">
                 <section className="rounded-xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
                   <div className="flex items-start justify-between gap-4">

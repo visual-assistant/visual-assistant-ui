@@ -127,6 +127,13 @@ type BulkPipelineStatus = "PENDING" | "RUNNING" | "DONE" | "FAILED";
 type BulkItemStatus = "PENDING" | "RUNNING" | "INDEXED" | "FAILED" | "IGNORED" | "SKIPPED";
 type BulkStep = "SCAN" | "SUMMARY" | "REVIEW" | "PIPELINE" | "DONE";
 
+type TechnicalKnowledgeSummary = {
+  created_technical_knowledge?: number | string | null;
+  rejected_candidates?: number | string | null;
+  batch_errors?: number | string | unknown[] | null;
+  [key: string]: unknown;
+};
+
 type BulkManifestFile = {
   client_file_id: string;
   filename: string;
@@ -161,11 +168,13 @@ type BulkImportItem = {
     upload_status?: BulkPipelineStatus | string | null;
     metadata_status?: BulkPipelineStatus | string | null;
     index_status?: BulkPipelineStatus | string | null;
+    technical_knowledge_status?: BulkPipelineStatus | string | null;
     last_error?: string | null;
     attempt_count?: number | null;
     started_at?: number | string | null;
     completed_at?: number | string | null;
   } | null;
+  technical_knowledge_summary?: TechnicalKnowledgeSummary | null;
   status?: BulkItemStatus | string | null;
   last_error?: string | null;
 };
@@ -350,6 +359,7 @@ const bulkPipelineSteps = [
   { key: "upload_status", label: "Upload" },
   { key: "metadata_status", label: "Métadonnées" },
   { key: "index_status", label: "Indexation" },
+  { key: "technical_knowledge_status", label: "Connaissances TK" },
 ] as const;
 
 function cx(...parts: Array<string | false | null | undefined>) {
@@ -647,17 +657,53 @@ function BulkPipelineStepIcon({ status }: { status?: string | null }) {
   return <span className="h-3.5 w-3.5 rounded-full border border-slate-300" />;
 }
 
+function technicalKnowledgeCreatedCount(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const summary =
+    record.technical_knowledge_summary && typeof record.technical_knowledge_summary === "object"
+      ? (record.technical_knowledge_summary as Record<string, unknown>)
+      : record.summary && typeof record.summary === "object"
+        ? (record.summary as Record<string, unknown>)
+        : null;
+
+  return (
+    safeNum(record.created_technical_knowledge) ??
+    safeNum(summary?.created_technical_knowledge) ??
+    safeNum(record.created_count) ??
+    safeNum(record.count)
+  );
+}
+
+function batchErrorCount(value: TechnicalKnowledgeSummary["batch_errors"]) {
+  if (Array.isArray(value)) return value.length;
+  return safeNum(value);
+}
+
+function technicalKnowledgeSummaryParts(summary?: TechnicalKnowledgeSummary | null) {
+  if (!summary) return [];
+
+  const created = safeNum(summary.created_technical_knowledge);
+  const rejected = safeNum(summary.rejected_candidates);
+  const errors = batchErrorCount(summary.batch_errors);
+  const parts: string[] = [];
+
+  if (created !== null) parts.push(`${created} TK créée${created > 1 ? "s" : ""}`);
+  if (rejected !== null) parts.push(`${rejected} candidat${rejected > 1 ? "s" : ""} rejeté${rejected > 1 ? "s" : ""}`);
+  if (errors !== null) parts.push(`${errors} erreur${errors > 1 ? "s" : ""} batch`);
+
+  return parts;
+}
+
 function bulkOverallLabel(item: BulkImportItem) {
   const status = safeStr(item.status).toUpperCase();
   const pipeline = item.pipeline || {};
-  if (status === "INDEXED" || bulkPipelineStatus(pipeline.index_status) === "DONE") {
-    return { label: "Indexé", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" };
-  }
   if (
     status === "FAILED" ||
     bulkPipelineStatus(pipeline.upload_status) === "FAILED" ||
     bulkPipelineStatus(pipeline.metadata_status) === "FAILED" ||
-    bulkPipelineStatus(pipeline.index_status) === "FAILED"
+    bulkPipelineStatus(pipeline.index_status) === "FAILED" ||
+    bulkPipelineStatus(pipeline.technical_knowledge_status) === "FAILED"
   ) {
     return { label: "Échec", cls: "border-red-200 bg-red-50 text-red-700" };
   }
@@ -665,14 +711,24 @@ function bulkOverallLabel(item: BulkImportItem) {
     return { label: "Ignoré", cls: "border-slate-200 bg-slate-100 text-slate-500" };
   }
   if (
+    (status === "INDEXED" || bulkPipelineStatus(pipeline.index_status) === "DONE") &&
+    bulkPipelineStatus(pipeline.technical_knowledge_status) === "DONE"
+  ) {
+    return { label: "Indexé + TK", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  }
+  if (
     status === "RUNNING" ||
     bulkPipelineStatus(pipeline.upload_status) === "RUNNING" ||
     bulkPipelineStatus(pipeline.metadata_status) === "RUNNING" ||
     bulkPipelineStatus(pipeline.index_status) === "RUNNING" ||
+    bulkPipelineStatus(pipeline.technical_knowledge_status) === "RUNNING" ||
     bulkPipelineStatus(pipeline.upload_status) === "DONE" ||
     bulkPipelineStatus(pipeline.metadata_status) === "DONE"
   ) {
     return { label: "En cours", cls: "border-blue-200 bg-blue-50 text-blue-700" };
+  }
+  if (status === "INDEXED" || bulkPipelineStatus(pipeline.index_status) === "DONE") {
+    return { label: "Indexé", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" };
   }
   return { label: "En attente", cls: "border-slate-200 bg-white text-slate-500" };
 }
@@ -1351,6 +1407,7 @@ function BulkImportMode({
               {pipelineItems.map((item) => {
                 const label = bulkOverallLabel(item);
                 const failed = label.label === "Échec";
+                const tkSummaryParts = technicalKnowledgeSummaryParts(item.technical_knowledge_summary);
                 return (
                   <tr key={item.item_id} className={cx("bg-white", failed && "bg-red-50/40")}>
                     <td className="px-5 py-3">
@@ -1359,6 +1416,15 @@ function BulkImportMode({
                         <div>
                           <p className="text-xs font-medium text-slate-900">{bulkItemFilename(item)}</p>
                           <p className="mt-0.5 font-mono text-[10px] text-slate-400">{bulkItemPath(item)}</p>
+                          {tkSummaryParts.length ? (
+                            <div className="mt-1.5 flex flex-wrap gap-1.5">
+                              {tkSummaryParts.map((part) => (
+                                <span key={part} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                                  {part}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     </td>
@@ -1549,7 +1615,9 @@ export default function SettingsPage() {
   const [indexByDocId, setIndexByDocId] = useState<Record<string, ProductDocumentIndex | null>>({});
   const [indexLoadingId, setIndexLoadingId] = useState<string | null>(null);
   const [indexingId, setIndexingId] = useState<string | null>(null);
+  const [indexingPhaseLabel, setIndexingPhaseLabel] = useState("");
   const [indexError, setIndexError] = useState<string | null>(null);
+  const [indexSuccess, setIndexSuccess] = useState<string | null>(null);
 
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState<DocumentFormState>(EMPTY_FORM);
@@ -1721,6 +1789,8 @@ export default function SettingsPage() {
     setEditOpen(false);
     setActionError(null);
     setIndexError(null);
+    setIndexSuccess(null);
+    setIndexingPhaseLabel("");
   }, [selectedDocId]);
 
   useEffect(() => {
@@ -1957,7 +2027,9 @@ export default function SettingsPage() {
     const id = docId(doc);
     if (!id) return;
     setIndexingId(id);
+    setIndexingPhaseLabel("Indexation PDF...");
     setIndexError(null);
+    setIndexSuccess(null);
     setActionError(null);
 
     setDocuments((prev) =>
@@ -1977,7 +2049,12 @@ export default function SettingsPage() {
     try {
       const res = await fetch(
         buildUrl(`/product-documents/${encodeURIComponent(id)}/index`),
-        { method: "POST", cache: "no-store" }
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ extract_technical_knowledge: false }),
+          cache: "no-store",
+        }
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -1997,6 +2074,30 @@ export default function SettingsPage() {
       } else {
         await fetchIndex(id);
       }
+
+      setIndexingPhaseLabel("Extraction des connaissances techniques...");
+      const tkRes = await fetch(
+        buildUrl(`/product-documents/${encodeURIComponent(id)}/technical-knowledge/extract`),
+        { method: "POST", cache: "no-store" }
+      );
+      const tkPayload = await tkRes.json().catch(() => null);
+      if (!tkRes.ok) {
+        const text = tkPayload?.detail || tkPayload?.message || tkPayload?.error || "";
+        setIndexError(
+          text && String(text).length < 260
+            ? `Indexation PDF terminée, mais extraction TK échouée: ${text}`
+            : "Indexation PDF terminée, mais extraction des connaissances techniques échouée."
+        );
+        await refresh();
+        return;
+      }
+
+      const createdCount = technicalKnowledgeCreatedCount(tkPayload);
+      setIndexSuccess(
+        createdCount !== null
+          ? `${createdCount} connaissance${createdCount > 1 ? "s" : ""} technique${createdCount > 1 ? "s" : ""} créée${createdCount > 1 ? "s" : ""}.`
+          : "Extraction des connaissances techniques terminée."
+      );
       await refresh();
       setSelectedDocId(id);
     } catch (e) {
@@ -2005,6 +2106,7 @@ export default function SettingsPage() {
       await refresh();
     } finally {
       setIndexingId(null);
+      setIndexingPhaseLabel("");
     }
   };
 
@@ -2283,6 +2385,11 @@ export default function SettingsPage() {
                 <div className="mx-auto max-w-5xl space-y-5">
                   {actionError ? <ErrorBox>{actionError}</ErrorBox> : null}
                   {indexError ? <ErrorBox>{indexError}</ErrorBox> : null}
+                  {indexSuccess ? (
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                      {indexSuccess}
+                    </div>
+                  ) : null}
 
                   <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                     <div className="flex items-start justify-between gap-5">
@@ -2338,7 +2445,7 @@ export default function SettingsPage() {
                           {indexingId === selectedDocId ? (
                             <>
                               <Loader2 className="h-4 w-4 animate-spin" />
-                              Indexation...
+                              {indexingPhaseLabel || "Indexation..."}
                             </>
                           ) : isIndexed(selectedDoc) ? (
                             <>
