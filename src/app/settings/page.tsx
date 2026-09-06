@@ -1212,7 +1212,8 @@ function AdvancedAdminPanel({ onRefresh }: { onRefresh: () => void }) {
   const [dryRunResult, setDryRunResult] = useState<ResetCorpusResponse | null>(null);
   const [resetResult, setResetResult] = useState<ResetCorpusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const canReset = confirmation === "RESET_PRODUCT_DOCUMENT_CORPUS" && !!dryRunResult && busy === null;
+  const trimmedConfirmation = confirmation.trim();
+  const canReset = trimmedConfirmation === "RESET_PRODUCT_DOCUMENT_CORPUS" && !!dryRunResult && busy === null;
   const displayedResult = resetResult || dryRunResult;
   const summaryEntries = resetCorpusSummaryEntries(displayedResult);
 
@@ -1225,7 +1226,7 @@ function AdvancedAdminPanel({ onRefresh }: { onRefresh: () => void }) {
           ? { dry_run: true, delete_guides: deleteGuides }
           : {
               dry_run: false,
-              confirmation: "RESET_PRODUCT_DOCUMENT_CORPUS",
+              confirm: trimmedConfirmation,
               delete_guides: deleteGuides,
             }
       ),
