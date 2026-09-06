@@ -156,6 +156,10 @@ PATCH /product-documents/{document_id}
 DELETE /product-documents/{document_id}
 POST /product-documents/{document_id}/file
 POST /product-documents/{document_id}/index
+POST /product-documents/{document_id}/technical-knowledge/extract
+GET /product-documents/{document_id}/technical-knowledge/extractions
+POST /technical-knowledge/extractions/{extraction_id}/resume
+POST /admin/product-documents/reset-corpus
 ```
 
 Flow UI :
@@ -177,8 +181,13 @@ Le front affiche :
 - extrait texte de l'element selectionne;
 - visuels associes en privilegiant `section_crop` ou `anchor_crop`, puis `page_snapshot` en fallback;
 - diagnostic `outline_meta`, modele, version d'index, nombre de candidats bruts, fallback et erreur eventuelle.
+- diagnostic d'extraction TechnicalKnowledge : statut, progression, lots traites, TK creees, candidats rejetes, erreurs batch, modele et extraction recente;
+- actions controlees pour extraire ou reprendre une extraction TechnicalKnowledge;
+- administration avancee avec reset du corpus documentaire, precede d'un dry-run et d'une confirmation exacte.
 
 `outline_candidates[]` reste reserve au diagnostic/audit et ne doit pas etre affiche comme plan principal.
+
+Le reset corpus dans `/settings` est une action destructive. L'UI appelle d'abord `POST /admin/product-documents/reset-corpus` en `dry_run: true`, affiche les volumes concernes, puis n'autorise le reset reel qu'apres saisie de `RESET_PRODUCT_DOCUMENT_CORPUS`. Les questions Atelier et les chantiers ne sont pas supprimes par ce flux. Les guides chantier peuvent etre inclus dans le reset via l'option dediee.
 
 ## Inbox SAV et chantiers
 
@@ -270,6 +279,11 @@ GET /guides?chantier_id={chantier_id}
 POST /chantiers/{chantier_id}
 POST /guides
 GET /guides/{guide_id}
+GET /guides/{guide_id}/installer-preview
+POST /guides/{guide_id}/public-link
+GET /guides/public/{slug}
+POST /guides/{guide_id}/share-preview
+POST /guides/{guide_id}/send
 GET /guides/{guide_id}/points
 PATCH /guides/{guide_id}/points/{point_id}
 POST /guides/{guide_id}/corrections
@@ -296,16 +310,19 @@ Fonctionnalites implementees :
 - colonne laterale cycle de vie, suivi installateur sobre, informations chantier et reperes.
 - preview installateur via `GET /guides/{guide_id}/installer-preview`;
 - modal `Apercu installateur` inspiree FigmaMake v13, accessible depuis `GuideChantierReview`;
+- route publique installateur `/guides/r/[slug]`, alimentee par `GET /guides/public/{slug}`;
 - la preview affiche uniquement les timings qui ont des points visibles;
 - la preview groupe par timing puis domaine, affiche les points `main` normalement et les points `secondary` dans `A garder en tete`;
 - la preview n'affiche jamais les points `hidden`;
 - les contacts PERGE de `administrative_contacts` sont affiches dans un bloc separe, jamais comme timing administratif;
 - les sources exploitables des points preview sont visibles avec lien vers extrait visuel si disponible.
+- panneau `Envoi installateur` dans `GuideChantierReview` avec creation/recuperation du lien public, copie/ouverture du lien, saisie destinataire, preview WhatsApp et envoi WhatsApp;
+- l'envoi WhatsApp appelle `/guides/{guide_id}/send` et reste bloque cote UI tant que le guide n'est pas `approved` ou `sent`;
+- les erreurs backend connues comme `guide_not_approved` ou `missing_recipient_phone` sont traduites en messages UI courts.
 
 Ce qui n'est pas encore implemente :
 
-- page publique finale ou slug public;
-- envoi WhatsApp/email;
+- envoi email du guide chantier;
 - tracking installateur vu/fait/question/photo;
 - ajout manuel de point, le bouton est seulement present visuellement et desactive.
 
@@ -319,6 +336,15 @@ Etape 2 realisee :
 6. Ne jamais afficher les points `hidden`.
 7. Afficher les sources exploitables par point si elles sont dans le payload preview.
 8. Garder les actions installateur interactives comme placeholders non branches.
+
+Etape 3 realisee :
+
+1. Ajouter la route publique `/guides/r/[slug]`.
+2. Brancher la creation/reutilisation du lien public via `/guides/{guide_id}/public-link`.
+3. Brancher la preview WhatsApp via `/guides/{guide_id}/share-preview`.
+4. Brancher l'envoi WhatsApp via `/guides/{guide_id}/send`.
+5. Pre-remplir le destinataire depuis le chantier quand les informations installateur existent.
+6. Garder la validation service technique comme garde-fou avant envoi WhatsApp.
 
 Verification faite lors de l'ajout :
 

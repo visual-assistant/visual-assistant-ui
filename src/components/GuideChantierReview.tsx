@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Droplets,
   Edit2,
   Eye,
@@ -21,6 +22,7 @@ import {
   Package,
   Phone,
   RefreshCw,
+  Send,
   Shield,
   Snowflake,
   User,
@@ -121,7 +123,7 @@ type PointsResponse = {
 
 type PointsSummary = NonNullable<NonNullable<PointsResponse["points"]>["summary"]>;
 
-type GuideDetail = {
+export type GuideDetail = {
   guide_id?: string | null;
   id?: string | null;
   title?: string | null;
@@ -142,6 +144,11 @@ type GuideDetail = {
     status?: string | null;
     channel?: string | null;
     sent_at?: number | string | null;
+    public_url?: string | null;
+    public_slug?: string | null;
+    recipient_phone?: string | null;
+    recipient_name?: string | null;
+    recipient_company?: string | null;
   } | null;
   usage_stats?: {
     view_count?: number | null;
@@ -197,7 +204,7 @@ type AdministrativeContact = {
   email?: string | null;
 };
 
-type InstallerPreviewResponse = {
+export type InstallerPreviewResponse = {
   ok?: boolean;
   schema_version?: string;
   guide?: {
@@ -228,6 +235,32 @@ type InstallerPreviewResponse = {
   } | null;
   timings?: InstallerPreviewTiming[] | null;
   administrative_contacts?: AdministrativeContact[] | null;
+};
+
+type GuideShareRecipient = {
+  name?: string | null;
+  company?: string | null;
+  phone?: string | null;
+};
+
+type GuideShareResponse = {
+  ok?: boolean;
+  guide?: GuideDetail | null;
+  public_url?: string | null;
+  public_slug?: string | null;
+  created?: boolean | null;
+  created_public_link?: boolean | null;
+  prepared_message?: {
+    channel?: string | null;
+    to?: string | null;
+    recipient?: GuideShareRecipient | null;
+    body?: string | null;
+    public_url?: string | null;
+  } | null;
+  detail?: string | null;
+  message?: string | null;
+  error?: string | null;
+  code?: string | null;
 };
 
 type EditablePoint = {
@@ -351,6 +384,28 @@ async function readJson<T>(path: string): Promise<T> {
     throw new Error(text || `Erreur API ${res.status}`);
   }
   return (await res.json()) as T;
+}
+
+function responseDetail(payload: unknown) {
+  if (!payload || typeof payload !== "object") return "";
+  const record = payload as Record<string, unknown>;
+  return safeStr(record.detail) || safeStr(record.message) || safeStr(record.error);
+}
+
+function shareErrorMessage(status: number, payload: unknown) {
+  const detail = responseDetail(payload);
+  const code =
+    payload && typeof payload === "object"
+      ? safeStr((payload as Record<string, unknown>).code) || detail
+      : detail;
+
+  if (status === 409 && code.includes("guide_not_approved")) {
+    return "Validez le guide avant l’envoi WhatsApp.";
+  }
+  if (status === 400 && code.includes("missing_recipient_phone")) {
+    return "Renseignez un numéro WhatsApp installateur.";
+  }
+  return detail || "";
 }
 
 function normalizeAssetUrl(url?: string | null) {
@@ -887,7 +942,7 @@ function AdministrativeContactsBlock({ contacts }: { contacts?: AdministrativeCo
   );
 }
 
-function InstallerPreviewWebapp({
+export function InstallerPreviewWebapp({
   preview,
   fallbackSourcesByPointId,
 }: {
@@ -1451,6 +1506,13 @@ export default function GuideChantierReview({ guideId, embedded = false }: Guide
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [installerPreview, setInstallerPreview] = useState<InstallerPreviewResponse | null>(null);
+  const [publicUrl, setPublicUrl] = useState("");
+  const [recipientName, setRecipientName] = useState("");
+  const [recipientCompany, setRecipientCompany] = useState("");
+  const [recipientPhone, setRecipientPhone] = useState("");
+  const [shareBusy, setShareBusy] = useState<"link" | "preview" | "send" | "copy" | null>(null);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [shareInfo, setShareInfo] = useState<string | null>(null);
 
   const loadGuide = useCallback(async () => {
     setError(null);
@@ -1564,6 +1626,24 @@ export default function GuideChantierReview({ guideId, embedded = false }: Guide
     (Array.isArray(guide?.products) ? guide?.products?.filter(Boolean).join(", ") : "") ||
     "Produit non renseigné";
   const status = statusConfig(guide?.status);
+  const guideStatus = safeStr(guide?.status, "draft").toLowerCase();
+  const canSendWhatsapp = guideStatus === "approved" || guideStatus === "sent";
+  const sentAt = safeStr(guide?.delivery?.sent_at);
+  const whatsappPreviewUrl = publicUrl || "Lien généré au moment de l’envoi";
+
+  useEffect(() => {
+    setPublicUrl(safeStr(guide?.delivery?.public_url));
+  }, [guide?.delivery?.public_url]);
+
+  useEffect(() => {
+    setRecipientName(safeStr(chantierDetail?.context?.installateur?.name));
+    setRecipientCompany(safeStr(chantierDetail?.context?.installateur?.company));
+    setRecipientPhone(safeStr(chantierDetail?.context?.installateur?.phone));
+  }, [
+    chantierDetail?.context?.installateur?.company,
+    chantierDetail?.context?.installateur?.name,
+    chantierDetail?.context?.installateur?.phone,
+  ]);
 
   const patchPoint = useCallback(
     async (pointId: string, payload: Record<string, unknown>) => {
@@ -1685,6 +1765,120 @@ export default function GuideChantierReview({ guideId, embedded = false }: Guide
     setPreviewOpen(true);
     void loadInstallerPreview();
   }, [loadInstallerPreview]);
+
+  const shareRecipient = useMemo<GuideShareRecipient>(
+    () => ({
+      name: recipientName.trim() || null,
+      company: recipientCompany.trim() || null,
+      phone: recipientPhone.trim() || null,
+    }),
+    [recipientCompany, recipientName, recipientPhone],
+  );
+
+  const applyShareResponse = useCallback((payload: GuideShareResponse) => {
+    if (payload.guide) {
+      setGuide((current) => ({
+        ...(current || {}),
+        ...payload.guide,
+        delivery: {
+          ...(current?.delivery || {}),
+          ...(payload.guide?.delivery || {}),
+        },
+      }));
+    }
+    const nextUrl =
+      safeStr(payload.public_url) ||
+      safeStr(payload.prepared_message?.public_url) ||
+      safeStr(payload.guide?.delivery?.public_url);
+    if (nextUrl) setPublicUrl(nextUrl);
+  }, []);
+
+  const createPublicLink = useCallback(async () => {
+    setShareBusy("link");
+    setShareError(null);
+    setShareInfo(null);
+    try {
+      const res = await fetch(apiUrl(`/guides/${encodeURIComponent(guideId)}/public-link`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: ACTOR }),
+      });
+      const payload = (await res.json().catch(() => null)) as GuideShareResponse | null;
+      if (!res.ok || !payload) throw new Error(shareErrorMessage(res.status, payload) || "Impossible de créer le lien public.");
+      applyShareResponse(payload);
+      setShareInfo(payload.created ? "Lien public créé." : "Lien public récupéré.");
+      if (!payload.guide) await loadGuide();
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : "Impossible de créer le lien public.");
+    } finally {
+      setShareBusy(null);
+    }
+  }, [applyShareResponse, guideId, loadGuide]);
+
+  const copyPublicLink = useCallback(async () => {
+    if (!publicUrl) return;
+    setShareBusy("copy");
+    setShareError(null);
+    setShareInfo(null);
+    try {
+      await navigator.clipboard.writeText(publicUrl);
+      setShareInfo("Lien copié.");
+    } catch {
+      setShareError("Copie impossible depuis ce navigateur.");
+    } finally {
+      setShareBusy(null);
+    }
+  }, [publicUrl]);
+
+  const previewWhatsappMessage = useCallback(async () => {
+    setShareBusy("preview");
+    setShareError(null);
+    setShareInfo(null);
+    try {
+      const res = await fetch(apiUrl(`/guides/${encodeURIComponent(guideId)}/share-preview`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actor: ACTOR,
+          recipient: shareRecipient,
+        }),
+      });
+      const payload = (await res.json().catch(() => null)) as GuideShareResponse | null;
+      if (!res.ok || !payload) throw new Error(shareErrorMessage(res.status, payload) || "Impossible de préparer le message WhatsApp.");
+      applyShareResponse(payload);
+      setShareInfo("Message WhatsApp préparé.");
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : "Impossible de préparer le message WhatsApp.");
+    } finally {
+      setShareBusy(null);
+    }
+  }, [applyShareResponse, guideId, shareRecipient]);
+
+  const sendWhatsappMessage = useCallback(async () => {
+    setShareBusy("send");
+    setShareError(null);
+    setShareInfo(null);
+    try {
+      const res = await fetch(apiUrl(`/guides/${encodeURIComponent(guideId)}/send`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actor: ACTOR,
+          channel: "WHATSAPP",
+          recipient: shareRecipient,
+        }),
+      });
+      const payload = (await res.json().catch(() => null)) as GuideShareResponse | null;
+      if (!res.ok || !payload) throw new Error(shareErrorMessage(res.status, payload) || "Impossible d'envoyer le WhatsApp.");
+      applyShareResponse(payload);
+      setShareInfo("Guide envoyé par WhatsApp.");
+      if (!payload.guide) await loadGuide();
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : "Impossible d'envoyer le WhatsApp.");
+    } finally {
+      setShareBusy(null);
+    }
+  }, [applyShareResponse, guideId, loadGuide, shareRecipient]);
 
   return (
     <section className={embedded ? "space-y-5" : "min-h-screen bg-slate-50 px-6 py-6"}>
@@ -1935,14 +2129,155 @@ export default function GuideChantierReview({ guideId, embedded = false }: Guide
                       {previewLoading && previewOpen ? <Loader2 className="h-4 w-4 animate-spin" /> : <Monitor className="h-4 w-4" />}
                       Aperçu installateur
                     </button>
-                    <button
-                      type="button"
-                      disabled
-                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium text-slate-400"
-                    >
-                      <ExternalLink className="h-4 w-4" />
-                      Lien public non branché
-                    </button>
+                  </div>
+                </section>
+
+                <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Envoi installateur</p>
+                    {sentAt ? (
+                      <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-700">
+                        Envoyé
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {guideStatus === "draft" ? (
+                    <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+                      Validez le guide avant l&apos;envoi WhatsApp. Le lien public reste disponible en brouillon.
+                    </div>
+                  ) : null}
+
+                  {sentAt ? (
+                    <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                      Envoyé le {formatDateTime(sentAt)}
+                      {safeStr(guide?.delivery?.recipient_phone) ? ` à ${guide?.delivery?.recipient_phone}` : ""}
+                    </div>
+                  ) : null}
+
+                  <div className="space-y-3">
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold text-slate-600">Lien public</label>
+                      <div className="flex gap-2">
+                        <input
+                          value={publicUrl}
+                          readOnly
+                          placeholder="Aucun lien public créé"
+                          className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void createPublicLink()}
+                          disabled={shareBusy !== null}
+                          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                          title="Créer ou récupérer le lien public"
+                        >
+                          {shareBusy === "link" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
+                        </button>
+                      </div>
+                      {publicUrl ? (
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void copyPublicLink()}
+                            disabled={shareBusy !== null}
+                            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            {shareBusy === "copy" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Copy className="h-3.5 w-3.5" />}
+                            Copier
+                          </button>
+                          <a
+                            href={publicUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 hover:bg-orange-100"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                            Ouvrir
+                          </a>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1 block text-xs font-semibold text-slate-600">Nom</span>
+                        <input
+                          value={recipientName}
+                          onChange={(event) => setRecipientName(event.target.value)}
+                          className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs outline-none focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+                          placeholder="Nom installateur"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block text-xs font-semibold text-slate-600">Société</span>
+                        <input
+                          value={recipientCompany}
+                          onChange={(event) => setRecipientCompany(event.target.value)}
+                          className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs outline-none focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+                          placeholder="Société"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-semibold text-slate-600">Numéro WhatsApp</span>
+                      <input
+                        value={recipientPhone}
+                        onChange={(event) => setRecipientPhone(event.target.value)}
+                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs outline-none focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+                        placeholder="+33600000000"
+                      />
+                    </label>
+
+                    <div>
+                      <span className="mb-1 block text-xs font-semibold text-slate-600">Message</span>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-relaxed text-slate-700">
+                        <p>Bonjour, PERGE a préparé votre guide chantier pour l&apos;installation.</p>
+                        <p className="mt-3">
+                          Vous pouvez le consulter ici :{" "}
+                          <span className={cx("font-medium", publicUrl ? "text-orange-700" : "text-slate-400")}>
+                            {whatsappPreviewUrl}
+                          </span>
+                        </p>
+                        <p className="mt-3">Le service technique PERGE reste disponible si besoin.</p>
+                      </div>
+                      <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+                        Message envoyé via template WhatsApp PERGE. Seul le lien du guide est personnalisé.
+                      </p>
+                    </div>
+
+                    {shareError ? (
+                      <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                        {shareError}
+                      </div>
+                    ) : null}
+                    {shareInfo ? (
+                      <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
+                        {shareInfo}
+                      </div>
+                    ) : null}
+
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        onClick={() => void previewWhatsappMessage()}
+                        disabled={shareBusy !== null}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        {shareBusy === "preview" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
+                        Prévisualiser
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void sendWhatsappMessage()}
+                        disabled={shareBusy !== null || !canSendWhatsapp}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+                      >
+                        {shareBusy === "send" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                        {guideStatus === "sent" ? "Renvoyer WhatsApp" : "Envoyer WhatsApp"}
+                      </button>
+                    </div>
                   </div>
                 </section>
 

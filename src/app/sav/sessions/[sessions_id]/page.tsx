@@ -18,7 +18,7 @@ import GuideChantierReview from "../../../../components/GuideChantierReview";
  *   NEXT_PUBLIC_INTERNAL_API_BASE_URL (optionnel)
  */
 
-const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge"] as const;
+const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge", "Denis Laffont"] as const;
 type UserName = (typeof USERS)[number];
 
 const NOTE_TARGET_OPTIONS = [

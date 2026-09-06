@@ -142,7 +142,7 @@ const SEEN_STORAGE_KEY = "sav_sessions_seen_sig_v1";
 
 // ✅ user dropdown
 const CURRENT_USER_STORAGE_KEY = "sav_current_user_v1";
-const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge"] as const;
+const USERS = ["Xavier Briffa", "Florent Boeuf", "William Perge", "Denis Laffont"] as const;
 const DEFAULT_SAV_SESSION_ID = "SAV-001";
 
 function normalizeStr(v: any) {

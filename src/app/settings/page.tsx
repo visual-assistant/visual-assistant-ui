@@ -226,6 +226,51 @@ type BulkImportResponse = {
   error?: string;
 };
 
+type ResetCorpusResponse = {
+  ok?: boolean;
+  dry_run?: boolean;
+  summary?: Record<string, unknown> | null;
+  counts?: Record<string, unknown> | null;
+  would_delete?: Record<string, unknown> | null;
+  deleted?: Record<string, unknown> | null;
+  detail?: string | null;
+  message?: string | null;
+  error?: string | null;
+  [key: string]: unknown;
+};
+
+type TechnicalKnowledgeExtractionLatest = {
+  extraction_id?: string | null;
+  status?: string | null;
+  model?: string | null;
+  extraction_version?: string | null;
+  created_technical_knowledge?: number | string | null;
+  rejected_candidates?: number | string | null;
+  batch_errors?: number | string | null;
+  batch_error_items?: unknown[] | null;
+  completed_batch_count?: number | string | null;
+  batch_count?: number | string | null;
+  remaining_batch_count?: number | string | null;
+  progress_percent?: number | string | null;
+  created_at?: number | string | null;
+  resumed_at?: number | string | null;
+  completed_at?: number | string | null;
+  interrupted_at?: number | string | null;
+  interrupt_reason?: string | null;
+  resume_count?: number | string | null;
+};
+
+type TechnicalKnowledgeExtractionsResponse = {
+  ok?: boolean;
+  document_id?: string | null;
+  count?: number | string | null;
+  latest?: TechnicalKnowledgeExtractionLatest | null;
+  items?: unknown[] | null;
+  detail?: string | null;
+  message?: string | null;
+  error?: string | null;
+};
+
 type IndexPage = {
   page?: number | null;
   text?: string | null;
@@ -675,6 +720,62 @@ function technicalKnowledgeCreatedCount(payload: unknown): number | null {
   );
 }
 
+function shortDebugId(value?: string | null) {
+  const id = safeStr(value);
+  if (!id) return "—";
+  return id.length > 18 ? `${id.slice(0, 10)}…${id.slice(-6)}` : id;
+}
+
+function tkExtractionStatusMeta(status?: string | null, count?: number | null) {
+  const normalized = safeStr(status).toUpperCase();
+  if (!count) {
+    return {
+      label: "Aucune extraction",
+      className: "border-amber-200 bg-amber-50 text-amber-700",
+    };
+  }
+  if (normalized === "RUNNING") {
+    return {
+      label: "Extraction TK en cours",
+      className: "border-blue-200 bg-blue-50 text-blue-700",
+    };
+  }
+  if (normalized === "PAUSED" || normalized === "INTERRUPTED") {
+    return {
+      label: "Extraction TK incomplète",
+      className: "border-amber-200 bg-amber-50 text-amber-700",
+    };
+  }
+  if (normalized === "DONE_WITH_ERRORS") {
+    return {
+      label: "Extraction TK terminée avec erreurs",
+      className: "border-orange-200 bg-orange-50 text-orange-700",
+    };
+  }
+  if (normalized === "DONE") {
+    return {
+      label: "Extraction TK terminée",
+      className: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    };
+  }
+  return {
+    label: normalized || "Statut inconnu",
+    className: "border-slate-200 bg-slate-50 text-slate-600",
+  };
+}
+
+function canResumeTkExtraction(status?: string | null) {
+  return ["PAUSED", "INTERRUPTED", "DONE_WITH_ERRORS"].includes(
+    safeStr(status).toUpperCase()
+  );
+}
+
+function formatPercent(value?: number | string | null) {
+  const num = safeNum(value);
+  if (num === null) return "—";
+  return `${Math.round(num)} %`;
+}
+
 function batchErrorCount(value: TechnicalKnowledgeSummary["batch_errors"]) {
   if (Array.isArray(value)) return value.length;
   return safeNum(value);
@@ -693,6 +794,78 @@ function technicalKnowledgeSummaryParts(summary?: TechnicalKnowledgeSummary | nu
   if (errors !== null) parts.push(`${errors} erreur${errors > 1 ? "s" : ""} batch`);
 
   return parts;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function resetCorpusErrorMessage(status: number, payload: ResetCorpusResponse | null) {
+  if (status === 401 || status === 403) return "Action non autorisée.";
+
+  const detail = safeStr(payload?.detail) || safeStr(payload?.message) || safeStr(payload?.error);
+  if (status === 400) {
+    const lower = detail.toLowerCase();
+    if (lower.includes("confirmation")) {
+      return "Confirmation manquante. Saisissez exactement RESET_PRODUCT_DOCUMENT_CORPUS.";
+    }
+  }
+  return detail || `Erreur reset corpus (${status}).`;
+}
+
+function resetCorpusSummaryValue(result: ResetCorpusResponse | null, keys: string[]) {
+  const containers = [
+    objectValue(result?.summary),
+    objectValue(result?.counts),
+    objectValue(result?.would_delete),
+    objectValue(result?.deleted),
+    objectValue(result),
+  ].filter(Boolean) as Array<Record<string, unknown>>;
+
+  for (const container of containers) {
+    for (const key of keys) {
+      const raw = container[key];
+      const nested = objectValue(raw);
+      const value = safeNum(raw) ?? safeNum(nested?.count) ?? safeNum(nested?.total);
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+function resetCorpusSummaryEntries(result: ResetCorpusResponse | null) {
+  return [
+    {
+      label: "Documents produits",
+      value: resetCorpusSummaryValue(result, ["product_documents", "product_document_count", "documents", "document_count"]),
+    },
+    {
+      label: "Indexations",
+      value: resetCorpusSummaryValue(result, ["product_document_indexes", "product_document_index_count", "indexes", "index_count"]),
+    },
+    {
+      label: "Assets / anchors",
+      value: resetCorpusSummaryValue(result, ["product_document_assets", "product_document_asset_count", "product_document_anchors", "assets", "anchors", "asset_count", "anchor_count"]),
+    },
+    {
+      label: "TechnicalKnowledge",
+      value: resetCorpusSummaryValue(result, ["technical_knowledge", "technical_knowledge_count", "technical_knowledges", "tk_count"]),
+    },
+    {
+      label: "Extractions TK",
+      value: resetCorpusSummaryValue(result, ["technical_knowledge_extractions", "technical_knowledge_extraction_count", "tk_extractions", "extraction_count"]),
+    },
+    {
+      label: "Bulk imports",
+      value: resetCorpusSummaryValue(result, ["product_document_bulk_imports", "product_document_bulk_import_count", "bulk_imports", "bulk_import_count"]),
+    },
+    {
+      label: "Guides chantier",
+      value: resetCorpusSummaryValue(result, ["guides", "guide_count", "guides_count", "guide_chantier_count"]),
+    },
+  ];
 }
 
 function bulkOverallLabel(item: BulkImportItem) {
@@ -797,15 +970,43 @@ function groupAnchorsBySection(anchors: IndexAnchor[]) {
 function DiagnosticPanel({
   doc,
   index,
+  tkExtractions,
+  tkLoading,
+  tkActionBusy,
+  tkActionMessage,
+  tkError,
+  onExtractTk,
+  onResumeTk,
 }: {
   doc: ProductDocument | null;
   index: ProductDocumentIndex | null;
+  tkExtractions: TechnicalKnowledgeExtractionsResponse | null;
+  tkLoading: boolean;
+  tkActionBusy: boolean;
+  tkActionMessage: string | null;
+  tkError: string | null;
+  onExtractTk: () => void;
+  onResumeTk: (extractionId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const meta = index?.outline_meta || {};
   const candidateCount = Array.isArray(index?.outline_candidates)
     ? index.outline_candidates.length
     : 0;
+  const latestTkExtraction = tkExtractions?.latest || null;
+  const extractionCount = safeNum(tkExtractions?.count) ?? (latestTkExtraction ? 1 : 0);
+  const tkStatusMeta = tkExtractionStatusMeta(latestTkExtraction?.status, extractionCount);
+  const completedBatchCount = safeNum(latestTkExtraction?.completed_batch_count);
+  const batchCount = safeNum(latestTkExtraction?.batch_count);
+  const createdTkCount = safeNum(latestTkExtraction?.created_technical_knowledge);
+  const rejectedCandidateCount = safeNum(latestTkExtraction?.rejected_candidates);
+  const tkBatchErrorCount =
+    safeNum(latestTkExtraction?.batch_errors) ??
+    (Array.isArray(latestTkExtraction?.batch_error_items)
+      ? latestTkExtraction.batch_error_items.length
+      : null);
+  const tkExtractionId = safeStr(latestTkExtraction?.extraction_id);
+  const canResume = tkExtractionId && canResumeTkExtraction(latestTkExtraction?.status);
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -816,7 +1017,7 @@ function DiagnosticPanel({
       >
         <span className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
           <Cpu className="h-4 w-4 text-slate-400" />
-          Diagnostic indexation
+          Diagnostic indexation & extraction
         </span>
         {open ? (
           <ChevronUp className="h-4 w-4 text-slate-400" />
@@ -860,9 +1061,322 @@ function DiagnosticPanel({
               {safeStr(meta.error || doc?.indexing?.last_error)}
             </div>
           ) : null}
+
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Connaissances techniques
+              </span>
+              <span
+                className={cx(
+                  "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+                  tkStatusMeta.className
+                )}
+              >
+                {tkStatusMeta.label}
+              </span>
+            </div>
+
+            {tkLoading ? (
+              <div className="inline-flex items-center gap-2 text-sm text-slate-500">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Chargement des extractions TK
+              </div>
+            ) : !extractionCount ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                Aucune extraction TK lancée pour ce document.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Statut</span>
+                  <span className="font-medium text-slate-900">
+                    {safeStr(latestTkExtraction?.status, "—")}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Lots traités</span>
+                  <span className="font-medium text-slate-900">
+                    {completedBatchCount !== null || batchCount !== null
+                      ? `${completedBatchCount ?? 0} / ${batchCount ?? "—"}`
+                      : "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Progression</span>
+                  <span className="font-medium text-slate-900">
+                    {formatPercent(latestTkExtraction?.progress_percent)}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">TK créées</span>
+                  <span className="font-medium text-slate-900">
+                    {createdTkCount ?? "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Candidats rejetés</span>
+                  <span className="font-medium text-slate-900">
+                    {rejectedCandidateCount ?? "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Erreurs batch</span>
+                  <span className="font-medium text-slate-900">
+                    {tkBatchErrorCount ?? "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Modèle TK</span>
+                  <span className="font-mono text-xs text-slate-900">
+                    {safeStr(latestTkExtraction?.model, "—")}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Version extraction</span>
+                  <span className="font-mono text-xs text-slate-900">
+                    {safeStr(latestTkExtraction?.extraction_version, "—")}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Extraction</span>
+                  <span className="font-mono text-xs text-slate-900">
+                    {shortDebugId(latestTkExtraction?.extraction_id)}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-4">
+                  <span className="text-slate-500">Dernière date</span>
+                  <span className="font-medium text-slate-900">
+                    {formatDateTime(
+                      latestTkExtraction?.completed_at || latestTkExtraction?.created_at
+                    ) || "—"}
+                  </span>
+                </div>
+
+                {tkBatchErrorCount ? (
+                  <div className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
+                    Voir détail backend si nécessaire. {tkBatchErrorCount} erreur
+                    {tkBatchErrorCount > 1 ? "s" : ""} batch détectée
+                    {tkBatchErrorCount > 1 ? "s" : ""}.
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {!extractionCount ? (
+                <button
+                  type="button"
+                  onClick={onExtractTk}
+                  disabled={tkActionBusy || tkLoading || !docId(doc)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {tkActionBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  Extraire les connaissances techniques
+                </button>
+              ) : null}
+              {canResume ? (
+                <button
+                  type="button"
+                  onClick={() => onResumeTk(tkExtractionId)}
+                  disabled={tkActionBusy || tkLoading}
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {tkActionBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                  Reprendre l’extraction
+                </button>
+              ) : null}
+            </div>
+
+            {tkActionMessage ? (
+              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                {tkActionMessage}
+              </div>
+            ) : null}
+            {tkError ? (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {tkError}
+              </div>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>
+  );
+}
+
+function AdvancedAdminPanel({ onRefresh }: { onRefresh: () => void }) {
+  const [deleteGuides, setDeleteGuides] = useState(true);
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState<"dry-run" | "reset" | null>(null);
+  const [dryRunResult, setDryRunResult] = useState<ResetCorpusResponse | null>(null);
+  const [resetResult, setResetResult] = useState<ResetCorpusResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const canReset = confirmation === "RESET_PRODUCT_DOCUMENT_CORPUS" && !!dryRunResult && busy === null;
+  const displayedResult = resetResult || dryRunResult;
+  const summaryEntries = resetCorpusSummaryEntries(displayedResult);
+
+  const callResetEndpoint = async (dryRun: boolean) => {
+    const res = await fetch(buildUrl("/admin/product-documents/reset-corpus"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        dryRun
+          ? { dry_run: true, delete_guides: deleteGuides }
+          : {
+              dry_run: false,
+              confirmation: "RESET_PRODUCT_DOCUMENT_CORPUS",
+              delete_guides: deleteGuides,
+            }
+      ),
+      cache: "no-store",
+    });
+    const payload = (await res.json().catch(() => null)) as ResetCorpusResponse | null;
+    if (!res.ok) throw new Error(resetCorpusErrorMessage(res.status, payload));
+    return payload || ({ ok: true, dry_run: dryRun } as ResetCorpusResponse);
+  };
+
+  const runDryRun = async () => {
+    setBusy("dry-run");
+    setError(null);
+    setResetResult(null);
+    setConfirmation("");
+    try {
+      setDryRunResult(await callResetEndpoint(true));
+    } catch (err) {
+      setDryRunResult(null);
+      setError(err instanceof Error ? err.message : "Impossible d'analyser le reset.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runReset = async () => {
+    if (!canReset) return;
+    setBusy("reset");
+    setError(null);
+    try {
+      const result = await callResetEndpoint(false);
+      setResetResult(result);
+      setDryRunResult(result);
+      setConfirmation("");
+      onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Impossible de supprimer le corpus documentaire.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <details className="border-t border-slate-200 bg-slate-50">
+      <summary className="cursor-pointer px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+        Administration avancée
+      </summary>
+      <div className="space-y-3 px-4 pb-4">
+        <div className="rounded-xl border border-slate-200 bg-white p-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-slate-900">Reset corpus documentaire</p>
+              <div className="mt-2 space-y-1 text-xs leading-relaxed text-slate-500">
+                <p>Action destructive.</p>
+                <p>Les documents, indexations, anchors/assets et TechnicalKnowledge seront supprimés.</p>
+                <p>Les questions Atelier Q/R et les chantiers ne sont pas supprimés.</p>
+                <p>Les anciennes réponses Atelier peuvent conserver un historique de sources qui ne correspond plus au nouveau corpus.</p>
+              </div>
+            </div>
+          </div>
+
+          <label className="mt-3 flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <input
+              type="checkbox"
+              checked={deleteGuides}
+              onChange={(event) => {
+                setDeleteGuides(event.target.checked);
+                setDryRunResult(null);
+                setResetResult(null);
+                setConfirmation("");
+              }}
+              className="mt-0.5 rounded accent-orange-600"
+            />
+            <span>Supprimer aussi les guides chantier existants</span>
+          </label>
+
+          <button
+            type="button"
+            onClick={() => void runDryRun()}
+            disabled={busy !== null}
+            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          >
+            {busy === "dry-run" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+            Analyser le reset
+          </button>
+
+          {displayedResult ? (
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              {resetResult ? (
+                <p className="mb-2 text-sm font-semibold text-emerald-700">Corpus documentaire supprimé.</p>
+              ) : (
+                <p className="mb-2 text-sm font-semibold text-slate-700">Éléments concernés par le reset</p>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                {summaryEntries.map((entry) => (
+                  <div key={entry.label} className="rounded-lg bg-white px-3 py-2">
+                    <p className="text-[11px] text-slate-400">{entry.label}</p>
+                    <p className="mt-0.5 text-base font-semibold text-slate-900">
+                      {entry.value ?? "—"}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {dryRunResult && !resetResult ? (
+            <div className="mt-3 space-y-2">
+              <label className="block">
+                <span className="mb-1 block text-xs font-semibold text-slate-600">
+                  Confirmation
+                </span>
+                <input
+                  value={confirmation}
+                  onChange={(event) => setConfirmation(event.target.value)}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-xs outline-none focus:border-red-300 focus:ring-2 focus:ring-red-100"
+                  placeholder="RESET_PRODUCT_DOCUMENT_CORPUS"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => void runReset()}
+                disabled={!canReset}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                {busy === "reset" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                Supprimer le corpus documentaire
+              </button>
+            </div>
+          ) : null}
+
+          {resetResult ? (
+            <button
+              type="button"
+              onClick={onRefresh}
+              className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              <RefreshCw className="h-4 w-4" />
+              Rafraîchir la liste
+            </button>
+          ) : null}
+
+          {error ? (
+            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {error}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -1618,6 +2132,16 @@ export default function SettingsPage() {
   const [indexingPhaseLabel, setIndexingPhaseLabel] = useState("");
   const [indexError, setIndexError] = useState<string | null>(null);
   const [indexSuccess, setIndexSuccess] = useState<string | null>(null);
+  const [technicalKnowledgeExtractionsByDocId, setTechnicalKnowledgeExtractionsByDocId] =
+    useState<Record<string, TechnicalKnowledgeExtractionsResponse | null>>({});
+  const [technicalKnowledgeExtractionLoadingId, setTechnicalKnowledgeExtractionLoadingId] =
+    useState<string | null>(null);
+  const [technicalKnowledgeExtractionBusyId, setTechnicalKnowledgeExtractionBusyId] =
+    useState<string | null>(null);
+  const [technicalKnowledgeExtractionError, setTechnicalKnowledgeExtractionError] =
+    useState<string | null>(null);
+  const [technicalKnowledgeExtractionMessage, setTechnicalKnowledgeExtractionMessage] =
+    useState<string | null>(null);
 
   const [addOpen, setAddOpen] = useState(false);
   const [addForm, setAddForm] = useState<DocumentFormState>(EMPTY_FORM);
@@ -1688,6 +2212,9 @@ export default function SettingsPage() {
   );
 
   const selectedIndex = selectedDocId ? indexByDocId[selectedDocId] || null : null;
+  const selectedTechnicalKnowledgeExtractions = selectedDocId
+    ? technicalKnowledgeExtractionsByDocId[selectedDocId] || null
+    : null;
   const selectedStats = selectedIndex?.stats || null;
   const selectedPdfUrl = safeStr(selectedDoc?.source?.url);
   const selectedItemText = shortText(selectedItem?.item.text, 1200);
@@ -1751,6 +2278,65 @@ export default function SettingsPage() {
     }
   };
 
+  const fetchTechnicalKnowledgeExtractions = async (documentId: string, silent = false) => {
+    if (!documentId) return null;
+    if (!silent) {
+      setTechnicalKnowledgeExtractionLoadingId(documentId);
+      setTechnicalKnowledgeExtractionError(null);
+    }
+    try {
+      const res = await fetch(
+        buildUrl(
+          `/product-documents/${encodeURIComponent(documentId)}/technical-knowledge/extractions`
+        ),
+        { cache: "no-store" }
+      );
+      if (res.status === 404) {
+        const empty = {
+          ok: true,
+          document_id: documentId,
+          count: 0,
+          latest: null,
+          items: [],
+        } satisfies TechnicalKnowledgeExtractionsResponse;
+        setTechnicalKnowledgeExtractionsByDocId((prev) => ({ ...prev, [documentId]: empty }));
+        return empty;
+      }
+      const payload = (await res.json().catch(() => null)) as
+        | TechnicalKnowledgeExtractionsResponse
+        | null;
+      if (!res.ok) {
+        const detail = safeStr(payload?.detail || payload?.message || payload?.error);
+        throw new Error(
+          detail && detail.length < 260
+            ? `Erreur diagnostic TK: ${detail}`
+            : "Erreur lors du chargement du diagnostic TK."
+        );
+      }
+      const value =
+        payload ||
+        ({
+          ok: true,
+          document_id: documentId,
+          count: 0,
+          latest: null,
+          items: [],
+        } satisfies TechnicalKnowledgeExtractionsResponse);
+      setTechnicalKnowledgeExtractionsByDocId((prev) => ({ ...prev, [documentId]: value }));
+      return value;
+    } catch (e) {
+      console.error("fetch technical knowledge extractions error", e);
+      if (!silent) {
+        setTechnicalKnowledgeExtractionError(
+          e instanceof Error ? e.message : "Erreur réseau diagnostic TK."
+        );
+      }
+      return null;
+    } finally {
+      if (!silent) setTechnicalKnowledgeExtractionLoadingId(null);
+    }
+  };
+
   const refresh = async (initial = false) => {
     setError(null);
     if (initial) setLoading(true);
@@ -1785,12 +2371,15 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!selectedDocId) return;
     void fetchIndex(selectedDocId, true);
+    void fetchTechnicalKnowledgeExtractions(selectedDocId, true);
     setSelectedItem(null);
     setEditOpen(false);
     setActionError(null);
     setIndexError(null);
     setIndexSuccess(null);
     setIndexingPhaseLabel("");
+    setTechnicalKnowledgeExtractionError(null);
+    setTechnicalKnowledgeExtractionMessage(null);
   }, [selectedDocId]);
 
   useEffect(() => {
@@ -2023,6 +2612,82 @@ export default function SettingsPage() {
     }
   };
 
+  const extractTechnicalKnowledge = async (documentId: string) => {
+    if (!documentId) return;
+    setTechnicalKnowledgeExtractionBusyId(documentId);
+    setTechnicalKnowledgeExtractionError(null);
+    setTechnicalKnowledgeExtractionMessage(null);
+    try {
+      const res = await fetch(
+        buildUrl(`/product-documents/${encodeURIComponent(documentId)}/technical-knowledge/extract`),
+        { method: "POST", cache: "no-store" }
+      );
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        const detail = safeStr(payload?.detail || payload?.message || payload?.error);
+        throw new Error(
+          detail && detail.length < 260
+            ? `Erreur extraction TK: ${detail}`
+            : "Erreur lors de l’extraction des connaissances techniques."
+        );
+      }
+      const createdCount = technicalKnowledgeCreatedCount(payload);
+      setTechnicalKnowledgeExtractionMessage(
+        createdCount !== null
+          ? `${createdCount} connaissance${createdCount > 1 ? "s" : ""} technique${createdCount > 1 ? "s" : ""} créée${createdCount > 1 ? "s" : ""}.`
+          : "Extraction des connaissances techniques lancée."
+      );
+      await fetchTechnicalKnowledgeExtractions(documentId, true);
+      await refresh();
+      setSelectedDocId(documentId);
+    } catch (e) {
+      console.error("technical knowledge extract error", e);
+      setTechnicalKnowledgeExtractionError(
+        e instanceof Error ? e.message : "Erreur réseau lors de l’extraction TK."
+      );
+    } finally {
+      setTechnicalKnowledgeExtractionBusyId(null);
+    }
+  };
+
+  const resumeTechnicalKnowledgeExtraction = async (documentId: string, extractionId: string) => {
+    if (!documentId || !extractionId) return;
+    setTechnicalKnowledgeExtractionBusyId(documentId);
+    setTechnicalKnowledgeExtractionError(null);
+    setTechnicalKnowledgeExtractionMessage(null);
+    try {
+      const res = await fetch(
+        buildUrl(`/technical-knowledge/extractions/${encodeURIComponent(extractionId)}/resume`),
+        { method: "POST", cache: "no-store" }
+      );
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        const detail = safeStr(payload?.detail || payload?.message || payload?.error);
+        throw new Error(
+          detail && detail.length < 260
+            ? `Erreur reprise TK: ${detail}`
+            : "Erreur lors de la reprise de l’extraction TK."
+        );
+      }
+      const createdCount = technicalKnowledgeCreatedCount(payload);
+      setTechnicalKnowledgeExtractionMessage(
+        createdCount !== null
+          ? `Reprise terminée. ${createdCount} connaissance${createdCount > 1 ? "s" : ""} technique${createdCount > 1 ? "s" : ""} créée${createdCount > 1 ? "s" : ""}.`
+          : "Reprise de l’extraction TK lancée."
+      );
+      await fetchTechnicalKnowledgeExtractions(documentId, true);
+      await refresh();
+      setSelectedDocId(documentId);
+    } catch (e) {
+      console.error("technical knowledge resume error", e);
+      setTechnicalKnowledgeExtractionError(
+        e instanceof Error ? e.message : "Erreur réseau lors de la reprise TK."
+      );
+    } finally {
+      setTechnicalKnowledgeExtractionBusyId(null);
+    }
+  };
+
   const runIndexation = async (doc: ProductDocument) => {
     const id = docId(doc);
     if (!id) return;
@@ -2098,6 +2763,7 @@ export default function SettingsPage() {
           ? `${createdCount} connaissance${createdCount > 1 ? "s" : ""} technique${createdCount > 1 ? "s" : ""} créée${createdCount > 1 ? "s" : ""}.`
           : "Extraction des connaissances techniques terminée."
       );
+      await fetchTechnicalKnowledgeExtractions(id, true);
       await refresh();
       setSelectedDocId(id);
     } catch (e) {
@@ -2377,6 +3043,8 @@ export default function SettingsPage() {
                     Aucun document.
                   </div>
                 )}
+
+                <AdvancedAdminPanel onRefresh={() => void refresh()} />
               </div>
             </aside>
 
@@ -2579,7 +3247,23 @@ export default function SettingsPage() {
                     )}
                   </div>
 
-                  <DiagnosticPanel doc={selectedDoc} index={selectedIndex} />
+                  <DiagnosticPanel
+                    doc={selectedDoc}
+                    index={selectedIndex}
+                    tkExtractions={selectedTechnicalKnowledgeExtractions}
+                    tkLoading={technicalKnowledgeExtractionLoadingId === selectedDocId}
+                    tkActionBusy={technicalKnowledgeExtractionBusyId === selectedDocId}
+                    tkActionMessage={technicalKnowledgeExtractionMessage}
+                    tkError={technicalKnowledgeExtractionError}
+                    onExtractTk={() => {
+                      if (selectedDocId) void extractTechnicalKnowledge(selectedDocId);
+                    }}
+                    onResumeTk={(extractionId) => {
+                      if (selectedDocId) {
+                        void resumeTechnicalKnowledgeExtraction(selectedDocId, extractionId);
+                      }
+                    }}
+                  />
                 </div>
               ) : (
                 <div className="flex h-full items-center justify-center text-center text-slate-500">
