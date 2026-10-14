@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AppShell from "../../components/AppShell";
+import { ChevronDown, ChevronUp, Loader2, Phone } from "lucide-react";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_INTERNAL_API || "http://localhost:8001";
@@ -109,6 +110,38 @@ type InboxItemDetail = {
   photos?: InboxPhoto[];
   photo_count?: number;
   source?: Record<string, unknown> | null;
+  transcription?: unknown;
+  transcript?: unknown;
+  segments?: unknown;
+  call?: Record<string, unknown> | null;
+};
+
+type CallConversation = {
+  conversation_id: string;
+  member_count?: number | null;
+  member_inbox_item_ids?: string[] | null;
+  members?: Record<string, unknown>[] | null;
+  external_phone?: string | null;
+  contact?: Record<string, unknown> | null;
+  perge_collaborators?: unknown[] | null;
+  started_at?: number | string | null;
+  ended_at?: number | string | null;
+  duration_seconds?: number | null;
+  summary?: string | null;
+  nature?: string | null;
+  scope?: string | null;
+  sav_type?: string | null;
+  product?: unknown;
+  analysis?: Record<string, unknown> | null;
+  linked_chantier_id?: string | null;
+  continuity?: unknown;
+  processing?: Record<string, unknown> | string | null;
+};
+
+type CallSyncJob = {
+  job_id?: string | null;
+  status?: string | null;
+  stage?: string | null;
 };
 
 type InboxOverviewColumn = {
@@ -126,9 +159,13 @@ type InboxOverviewResponse = {
   };
   columns: InboxOverviewColumn[];
   other_count: number;
+  payload?: {
+    call_conversations?: CallConversation[] | null;
+  } | null;
+  call_conversations?: CallConversation[] | null;
 };
 
-type ChannelFilter = "ALL" | "EMAIL" | "WHATSAPP";
+type ChannelFilter = "ALL" | "EMAIL" | "WHATSAPP" | "VOICE_CALL";
 
 type ProductOption = {
   code: string;
@@ -182,6 +219,7 @@ function channelLabel(channel?: string | null) {
   const c = (channel || "").toUpperCase();
   if (c === "EMAIL") return "Email";
   if (c === "WHATSAPP") return "WhatsApp";
+  if (c === "VOICE_CALL") return "Appel";
   return c || "Canal";
 }
 
@@ -588,6 +626,73 @@ function InboxCard({
   );
 }
 
+function CallConversationCard({
+  call,
+  selected,
+  onSelect,
+}: {
+  call: CallConversation;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const outOfScope = callScope(call) === "OUT_OF_SCOPE";
+  const collaborators = callCollaborators(call);
+  const memberCount = call.member_count || call.member_inbox_item_ids?.length || 1;
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={[
+        "w-full rounded-2xl border bg-white p-4 text-left transition",
+        selected
+          ? "border-slate-900 shadow-sm"
+          : "border-slate-200 hover:border-slate-300 hover:shadow-sm",
+      ].join(" ")}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-3 py-1 text-xs font-medium text-violet-800">
+            <Phone className="h-3.5 w-3.5" /> Appel
+          </span>
+          <span className={[
+            "inline-flex rounded-full px-3 py-1 text-xs font-medium",
+            outOfScope ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800",
+          ].join(" ")}>
+            {outOfScope ? "Hors périmètre" : "SAV pertinent"}
+          </span>
+        </div>
+        <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+          {memberCount} appel{memberCount > 1 ? "s" : ""}
+        </span>
+      </div>
+
+      <div className="mt-3 line-clamp-2 text-base font-semibold text-slate-950">
+        {callTitle(call)}
+      </div>
+      <div className="mt-2 text-sm text-slate-600">
+        {callPhoneOrContact(call)}{callProductLabel(call) ? ` · ${callProductLabel(call)}` : ""}
+      </div>
+      <div className="mt-1 text-sm text-slate-500">
+        {callDate(call)} · {callDuration(call.duration_seconds)}
+      </div>
+      {call.summary || callAnalysisSummary(call) ? (
+        <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-700">
+          {safeStr(call.summary) || callAnalysisSummary(call)}
+        </p>
+      ) : null}
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+        {collaborators.length ? <span>{collaborators.join(", ")}</span> : <span>Collaborateur non renseigné</span>}
+        <span>·</span>
+        <span>{callProcessingLabel(call)}</span>
+      </div>
+      <div className="mt-2 text-xs font-medium text-slate-600">
+        {call.linked_chantier_id ? `Chantier ${call.linked_chantier_id}` : "Non rattaché"}
+      </div>
+    </button>
+  );
+}
+
 function ColumnSection({
   title,
   subtitle,
@@ -599,6 +704,9 @@ function ColumnSection({
   scopeChangingId,
   emptyLabel,
   tone = "neutral",
+  calls = [],
+  selectedCallId,
+  onSelectCall,
 }: {
   title: string;
   subtitle: string;
@@ -610,6 +718,9 @@ function ColumnSection({
   scopeChangingId: string | null;
   emptyLabel: string;
   tone?: "sav" | "out" | "neutral";
+  calls?: CallConversation[];
+  selectedCallId: string | null;
+  onSelectCall: (call: CallConversation) => void;
 }) {
   const toneClasses =
     tone === "sav"
@@ -637,11 +748,11 @@ function ColumnSection({
         </div>
 
         <div className="px-2 text-sm font-semibold text-slate-700">
-          {items.length}
+          {items.length + calls.length}
         </div>
       </div>
 
-      {items.length === 0 ? (
+      {items.length === 0 && calls.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-neutral-200 bg-neutral-50 px-4 py-6 text-sm text-neutral-500">
           {emptyLabel}
         </div>
@@ -656,6 +767,14 @@ function ColumnSection({
               onIgnore={() => onIgnore(item)}
               onToggleScope={() => onToggleScope(item)}
               scopeChanging={scopeChangingId === item.inbox_item_id}
+            />
+          ))}
+          {calls.map((call) => (
+            <CallConversationCard
+              key={call.conversation_id}
+              call={call}
+              selected={selectedCallId === call.conversation_id}
+              onSelect={() => onSelectCall(call)}
             />
           ))}
         </div>
@@ -673,6 +792,16 @@ export default function InboxSavPage() {
   const [channelFilter, setChannelFilter] = useState<ChannelFilter>("ALL");
 
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
+  const [callTranscriptOpen, setCallTranscriptOpen] = useState(false);
+  const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
+  const [callTranscriptError, setCallTranscriptError] = useState<string | null>(null);
+  const [callTranscriptItem, setCallTranscriptItem] = useState<InboxItemDetail | null>(null);
+  const [callAttachOpen, setCallAttachOpen] = useState(false);
+  const [callAttachMemberId, setCallAttachMemberId] = useState<string | null>(null);
+  const [callSyncJob, setCallSyncJob] = useState<CallSyncJob | null>(null);
+  const [callSyncError, setCallSyncError] = useState<string | null>(null);
+  const callSyncStarted = useRef(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [ignoringId, setIgnoringId] = useState<string | null>(null);
   const [scopeChangingId, setScopeChangingId] = useState<string | null>(null);
@@ -943,6 +1072,13 @@ export default function InboxSavPage() {
           setSelectedItemId(null);
         }
       }
+
+      if (selectedCallId) {
+        const calls = getCallConversations(data);
+        if (!calls.some((call) => call.conversation_id === selectedCallId)) {
+          setSelectedCallId(null);
+        }
+      }
     } catch (e) {
       console.error("fetch /inbox/overview error", e);
       setError("Erreur réseau lors du chargement de l’Inbox SAV.");
@@ -952,10 +1088,66 @@ export default function InboxSavPage() {
     }
   };
 
+  const pollCallSync = async (jobId: string): Promise<void> => {
+    try {
+      const res = await fetch(buildUrl(`/inbox/calls/sync/${encodeURIComponent(jobId)}`), {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("sync status unavailable");
+
+      const job = (await res.json()) as CallSyncJob;
+      setCallSyncJob({ ...job, job_id: job.job_id || jobId });
+
+      const status = safeStr(job.status).toLowerCase();
+      if (status === "completed") {
+        await fetchOverview({ silent: true });
+        return;
+      }
+
+      if (status === "failed") {
+        setCallSyncError("La synchronisation des appels n’a pas abouti. Les appels déjà disponibles restent consultables.");
+        return;
+      }
+
+      window.setTimeout(() => void pollCallSync(jobId), 1500);
+    } catch (e) {
+      console.error("poll call sync error", e);
+      setCallSyncError("La synchronisation des appels n’a pas abouti. Les appels déjà disponibles restent consultables.");
+    }
+  };
+
+  const startCallSync = async () => {
+    if (callSyncStarted.current) return;
+    callSyncStarted.current = true;
+    setCallSyncError(null);
+
+    try {
+      const res = await fetch(buildUrl("/inbox/calls/sync"), {
+        method: "POST",
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("call sync unavailable");
+
+      const payload = (await res.json()) as CallSyncJob;
+      const jobId = safeStr(payload.job_id);
+      setCallSyncJob(payload);
+      if (jobId) await pollCallSync(jobId);
+    } catch (e) {
+      console.error("start call sync error", e);
+      setCallSyncError("La synchronisation des appels n’a pas abouti. Les appels déjà disponibles restent consultables.");
+    }
+  };
+
   useEffect(() => {
     fetchOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelFilter]);
+
+  useEffect(() => {
+    void startCallSync();
+    // La synchronisation est volontairement déclenchée une seule fois au chargement.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const relevantColumn = useMemo(() => {
     return pickRelevantColumn(overview?.columns || []);
@@ -964,6 +1156,19 @@ export default function InboxSavPage() {
   const outOfScopeColumn = useMemo(() => {
     return pickOutOfScopeColumn(overview?.columns || []);
   }, [overview]);
+
+  const callConversations = useMemo(
+    () => (channelFilter === "ALL" || channelFilter === "VOICE_CALL" ? getCallConversations(overview) : []),
+    [overview, channelFilter],
+  );
+  const relevantCalls = useMemo(
+    () => callConversations.filter((call) => callScope(call) !== "OUT_OF_SCOPE"),
+    [callConversations],
+  );
+  const outOfScopeCalls = useMemo(
+    () => callConversations.filter((call) => callScope(call) === "OUT_OF_SCOPE"),
+    [callConversations],
+  );
 
   const filteredRelevantItems = useMemo(() => {
     return relevantColumn.items || [];
@@ -977,10 +1182,15 @@ export default function InboxSavPage() {
     return allItems.find((x) => x.inbox_item_id === selectedItemId) || null;
   }, [relevantColumn, outOfScopeColumn, selectedItemId]);
 
-  const reviewPanelOpen = Boolean(selectedItem);
+  const selectedCall = useMemo(
+    () => callConversations.find((call) => call.conversation_id === selectedCallId) || null,
+    [callConversations, selectedCallId],
+  );
+
+  const reviewPanelOpen = Boolean(selectedItem) || Boolean(selectedCall);
 
   const selectedColumnKey = useMemo(() => {
-    if (!selectedItem) return null;
+    if (!selectedItem) return selectedCall ? callScope(selectedCall) : null;
 
     const scope = (selectedItem.scope || "").toUpperCase();
 
@@ -1444,6 +1654,45 @@ export default function InboxSavPage() {
     fetchInboxItemDetail(selectedItemId);
   }, [selectedItemId]);
 
+  const loadCallTranscript = async () => {
+    if (!selectedCall) return;
+    const memberId = callMemberId(selectedCall);
+    setCallTranscriptOpen(true);
+    setCallTranscriptError(null);
+    setCallTranscriptItem(null);
+
+    if (!memberId) {
+      setCallTranscriptError("Transcription non disponible");
+      return;
+    }
+
+    setCallTranscriptLoading(true);
+    try {
+      const res = await fetch(buildUrl(`/inbox/items/${encodeURIComponent(memberId)}`), {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("transcript unavailable");
+      setCallTranscriptItem((await res.json()) as InboxItemDetail);
+    } catch (e) {
+      console.error("fetch call transcript error", e);
+      setCallTranscriptError("Transcription non disponible");
+    } finally {
+      setCallTranscriptLoading(false);
+    }
+  };
+
+  const openCallAttachment = () => {
+    if (!selectedCall) return;
+    const memberId = callMemberId(selectedCall);
+    if (!memberId) return;
+
+    resetAttachForm();
+    setAttachError(null);
+    setAttachSuccess(null);
+    setCallAttachMemberId(memberId);
+    setCallAttachOpen(true);
+  };
+
 const buildReviewPanelPayload = () => ({
   scope: formScope,
   sav_type: formScope === "SAV_RELEVANT" ? formSavType : null,
@@ -1604,6 +1853,70 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
     }
   };
 
+  const attachSelectedCallConversation = async () => {
+    if (!callAttachMemberId) return;
+
+    const selectedChantierId = attachSelectedChantierId.trim();
+    const newChantierId = attachNewChantierId.trim();
+    const chantierId = selectedChantierId || newChantierId;
+
+    if (!chantierId) {
+      setAttachError("Sélectionne un chantier existant ou saisis une nouvelle référence chantier.");
+      return;
+    }
+
+    const isNewChantier = !selectedChantierId && Boolean(newChantierId);
+    if (!isNewChantier && !attachCreateNewSav && !attachSelectedSavSessionId.trim()) {
+      setAttachError("Sélectionne une session SAV existante ou choisis d’en créer une nouvelle.");
+      return;
+    }
+
+    const savSessionIdToUse = isNewChantier
+      ? DEFAULT_SAV_SESSION_ID
+      : attachCreateNewSav
+      ? "__new__"
+      : attachSelectedSavSessionId.trim() || DEFAULT_SAV_SESSION_ID;
+
+    setAttachError(null);
+    setAttachSuccess(null);
+    setAttachLoading(true);
+
+    try {
+      const res = await fetch(
+        buildUrl(`/inbox/items/${encodeURIComponent(callAttachMemberId)}/attach`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chantier_id: chantierId,
+            sav_session_id: savSessionIdToUse,
+            actor: attachActor.trim() || null,
+          }),
+          cache: "no-store",
+        },
+      );
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        setAttachError(
+          txt && txt.length < 260
+            ? `Erreur rattachement: ${txt}`
+            : "Erreur lors du rattachement de l’appel.",
+        );
+        return;
+      }
+
+      setAttachSuccess(`Rattachement effectué vers ${chantierId} / ${savSessionIdToUse}.`);
+      setCallAttachOpen(false);
+      await fetchOverview({ silent: true });
+    } catch (e) {
+      console.error("attach call conversation error", e);
+      setAttachError("Erreur réseau lors du rattachement de l’appel.");
+    } finally {
+      setAttachLoading(false);
+    }
+  };
+
   return (
     <AppShell>
       <main className="min-h-screen bg-slate-50 text-slate-950">
@@ -1614,7 +1927,7 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
               Inbox SAV
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              Vue unifiée — emails + WhatsApp avant rattachement chantier
+              Vue unifiée — emails, WhatsApp et appels avant rattachement chantier
             </p>
           </div>
 
@@ -1640,10 +1953,16 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-sm font-semibold text-slate-700">Canal :</span>
 
-            {(["ALL", "EMAIL", "WHATSAPP"] as const).map((value) => {
+            {(["ALL", "EMAIL", "WHATSAPP", "VOICE_CALL"] as const).map((value) => {
               const active = channelFilter === value;
               const label =
-                value === "ALL" ? "Tous" : value === "EMAIL" ? "Email" : "WhatsApp";
+                value === "ALL"
+                  ? "Tous"
+                  : value === "EMAIL"
+                  ? "Email"
+                  : value === "WHATSAPP"
+                  ? "WhatsApp"
+                  : "Appel";
 
               return (
                 <button
@@ -1666,6 +1985,29 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
           {actionError ? (
             <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
               {actionError}
+            </div>
+          ) : null}
+
+          {callSyncJob && !callSyncError && safeStr(callSyncJob.status).toLowerCase() !== "completed" ? (
+            <div className="mt-4 flex items-center gap-2 rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>
+                {safeStr(callSyncJob.stage).toLowerCase() === "crawler"
+                  ? "Récupération des appels récents…"
+                  : safeStr(callSyncJob.stage).toLowerCase() === "transcription"
+                  ? "Transcription des appels…"
+                  : safeStr(callSyncJob.stage).toLowerCase() === "analysis"
+                  ? "Préparation des résumés…"
+                  : safeStr(callSyncJob.stage).toLowerCase() === "queued"
+                  ? "Import des fichiers…"
+                  : "Synchronisation des appels…"}
+              </span>
+            </div>
+          ) : null}
+
+          {callSyncError ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              {callSyncError}
             </div>
           ) : null}
          </div>
@@ -1694,6 +2036,17 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                 scopeChangingId={scopeChangingId}
                 emptyLabel="Aucun item SAV pertinent avec les filtres actuels."
                 tone="sav"
+                calls={relevantCalls}
+                selectedCallId={selectedCallId}
+                onSelectCall={(call) => {
+                  setSelectedItemId(null);
+                  setSelectedCallId(call.conversation_id);
+                  setCallAttachOpen(false);
+                  setCallAttachMemberId(null);
+                  setCallTranscriptOpen(false);
+                  setCallTranscriptItem(null);
+                  setCallTranscriptError(null);
+                }}
               />
             ) : null}
 
@@ -1709,6 +2062,17 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                 scopeChangingId={scopeChangingId}
                 emptyLabel="Aucun item hors périmètre."
                 tone="out"
+                calls={outOfScopeCalls}
+                selectedCallId={selectedCallId}
+                onSelectCall={(call) => {
+                  setSelectedItemId(null);
+                  setSelectedCallId(call.conversation_id);
+                  setCallAttachOpen(false);
+                  setCallAttachMemberId(null);
+                  setCallTranscriptOpen(false);
+                  setCallTranscriptItem(null);
+                  setCallTranscriptError(null);
+                }}
               />
             ) : null}
 
@@ -1717,7 +2081,10 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                 <button
                   type="button"
                   aria-label="Fermer le panneau review"
-                  onClick={() => setSelectedItemId(null)}
+                  onClick={() => {
+                    setSelectedItemId(null);
+                    setSelectedCallId(null);
+                  }}
                   className="fixed inset-0 z-40 cursor-default bg-slate-950/35 backdrop-blur-[1px]"
                 />
 
@@ -1734,14 +2101,305 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
 
                 <button
                   type="button"
-                  onClick={() => setSelectedItemId(null)}
+                  onClick={() => {
+                    setSelectedItemId(null);
+                    setSelectedCallId(null);
+                  }}
                   className="rounded-xl px-3 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100"
                 >
                   Fermer
                 </button>
               </div>
 
-              {!selectedItem ? (
+              {selectedCall ? (
+                <div className="mt-6 flex flex-col gap-5">
+                  <div className="rounded-2xl bg-violet-50 p-5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-3 py-1 text-xs font-medium text-violet-800">
+                        <Phone className="h-3.5 w-3.5" /> Appel téléphonique
+                      </span>
+                      <span className={[
+                        "inline-flex rounded-full px-3 py-1 text-xs font-medium",
+                        callScope(selectedCall) === "OUT_OF_SCOPE"
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-emerald-100 text-emerald-800",
+                      ].join(" ")}>
+                        {callScope(selectedCall) === "OUT_OF_SCOPE" ? "Hors périmètre" : "SAV pertinent"}
+                      </span>
+                    </div>
+                    <h3 className="mt-3 text-xl font-semibold text-slate-950">{callTitle(selectedCall)}</h3>
+                    <p className="mt-1 text-sm text-slate-600">{callPhoneOrContact(selectedCall)}</p>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {callDate(selectedCall)} · {callDuration(selectedCall.duration_seconds)} · {selectedCall.member_count || selectedCall.member_inbox_item_ids?.length || 1} appel(s)
+                    </p>
+                  </div>
+
+                  <section className="rounded-2xl border border-neutral-200 p-4">
+                    <h3 className="text-sm font-semibold text-neutral-900">Métadonnées</h3>
+                    <dl className="mt-3 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+                      <div><dt className="text-xs text-neutral-500">Collaborateur(s) PERGE</dt><dd className="font-medium text-neutral-800">{callCollaborators(selectedCall).join(", ") || "Non renseigné"}</dd></div>
+                      <div><dt className="text-xs text-neutral-500">Produit</dt><dd className="font-medium text-neutral-800">{callProductLabel(selectedCall) || "Non détecté"}</dd></div>
+                      <div><dt className="text-xs text-neutral-500">Catégorie SAV</dt><dd className="font-medium text-neutral-800">{selectedCall.sav_type || "Non qualifiée"}</dd></div>
+                      <div><dt className="text-xs text-neutral-500">Chantier</dt><dd className="font-medium text-neutral-800">{selectedCall.linked_chantier_id || "Non rattaché"}</dd></div>
+                    </dl>
+                  </section>
+
+                  <section className="rounded-2xl border border-orange-200 bg-orange-50/25 p-4">
+                    <h3 className="text-sm font-semibold text-neutral-900">Résumé</h3>
+                    <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-neutral-800">
+                      {safeStr(selectedCall.summary) || "Résumé non disponible."}
+                    </p>
+                  </section>
+
+                  <section className="rounded-2xl border border-neutral-200 p-4">
+                    <h3 className="text-sm font-semibold text-neutral-900">{callAnalysisTitle(selectedCall)}</h3>
+                    {callAnalysisSummary(selectedCall) ? (
+                      <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-neutral-700">
+                        {callAnalysisSummary(selectedCall)}
+                      </p>
+                    ) : null}
+                    <div className="mt-3 grid gap-4 text-sm">
+                      <div><span className="text-xs text-neutral-500">Nature de l’appel</span><p className="font-medium text-neutral-800">{selectedCall.nature || "Non déterminée"}</p></div>
+                      <div><span className="text-xs text-neutral-500">Type SAV</span><p className="font-medium text-neutral-800">{selectedCall.sav_type || "Non déterminé"}</p></div>
+                      <div>
+                        <span className="text-xs text-neutral-500">Actions identifiées</span>
+                        {callAnalysisList(selectedCall, "actions", "identified_actions", "actions_identifiees").length ? (
+                          <ul className="mt-1 list-disc space-y-1 pl-5 text-neutral-800">
+                            {callAnalysisList(selectedCall, "actions", "identified_actions", "actions_identifiees").map((item) => <li key={item}>{item}</li>)}
+                          </ul>
+                        ) : <p className="mt-1 text-neutral-500">Aucune action identifiée.</p>}
+                      </div>
+                      <div>
+                        <span className="text-xs text-neutral-500">Incertitudes</span>
+                        {callAnalysisList(selectedCall, "uncertainties", "incertitudes", "limites").length ? (
+                          <ul className="mt-1 list-disc space-y-1 pl-5 text-amber-800">
+                            {callAnalysisList(selectedCall, "uncertainties", "incertitudes", "limites").map((item) => <li key={item}>{item}</li>)}
+                          </ul>
+                        ) : <p className="mt-1 text-neutral-500">Aucune incertitude renseignée.</p>}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="rounded-2xl border border-neutral-200 p-4">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (callTranscriptOpen) setCallTranscriptOpen(false);
+                        else void loadCallTranscript();
+                      }}
+                      className="flex w-full items-center justify-between text-left text-sm font-semibold text-neutral-900"
+                    >
+                      <span>{callTranscriptOpen ? "Masquer la transcription" : "Voir la transcription"}</span>
+                      {callTranscriptOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    </button>
+                    {callTranscriptOpen ? (
+                      <div className="mt-3">
+                        {callTranscriptLoading ? <p className="text-sm text-neutral-500">Chargement de la transcription…</p> : null}
+                        {callTranscriptError ? <p className="text-sm text-neutral-500">{callTranscriptError}</p> : null}
+                        {!callTranscriptLoading && !callTranscriptError && transcriptSegments(callTranscriptItem).length === 0 ? (
+                          <p className="text-sm text-neutral-500">Transcription non disponible</p>
+                        ) : null}
+                        {transcriptSegments(callTranscriptItem).length > 0 ? (
+                          <div className="space-y-3">
+                            {transcriptSegments(callTranscriptItem).map((segment, index) => (
+                              <div key={`${segment.timestamp}-${index}`} className="rounded-xl bg-neutral-50 px-3 py-2 text-sm">
+                                <div className="text-xs font-semibold text-neutral-500">{segment.speaker}{segment.timestamp ? ` · ${segment.timestamp}` : ""}</div>
+                                <div className="mt-1 whitespace-pre-wrap text-neutral-800">{segment.text}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </section>
+
+                  <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+                    <p className="text-sm text-neutral-600">
+                      Le rattachement utilise un membre de cette conversation ; le backend rattache ensuite tous les appels membres ensemble.
+                    </p>
+                    <button
+                      type="button"
+                      disabled={!callMemberId(selectedCall)}
+                      onClick={openCallAttachment}
+                      className="mt-3 rounded-2xl bg-neutral-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {selectedCall.linked_chantier_id ? "Modifier le rattachement" : "Rattacher au chantier"}
+                    </button>
+
+                    {attachSuccess && !callAttachOpen ? (
+                      <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                        {attachSuccess}
+                      </div>
+                    ) : null}
+
+                    {callAttachOpen ? (
+                      <div className="mt-4 rounded-2xl border border-violet-200 bg-violet-50/40 p-4">
+                        <div className="text-sm font-semibold text-neutral-900">Rattacher cette conversation</div>
+                        <p className="mt-1 text-xs text-neutral-500">
+                          Le premier appel membre est utilisé pour rattacher toute la CallConversation.
+                        </p>
+
+                        {attachError ? (
+                          <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                            {attachError}
+                          </div>
+                        ) : null}
+
+                        <div className="mt-4 grid gap-4">
+                          <div className="flex flex-col gap-2">
+                            <span className="text-sm font-medium text-neutral-700">Trouver un chantier existant</span>
+                            <div className="flex gap-2">
+                              <input
+                                className="min-w-0 flex-1 rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm"
+                                placeholder="Référence, installateur ou morceau de texte…"
+                                value={attachQuery}
+                                onChange={(e) => setAttachQuery(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void searchChantiersForAttach();
+                                  }
+                                }}
+                              />
+                              <button
+                                type="button"
+                                onClick={searchChantiersForAttach}
+                                disabled={attachSearchLoading}
+                                className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm font-medium text-neutral-800 hover:bg-neutral-50 disabled:opacity-50"
+                              >
+                                {attachSearchLoading ? "Recherche…" : "Chercher"}
+                              </button>
+                            </div>
+                            {attachResults.length > 0 ? (
+                              <div className="max-h-48 overflow-auto rounded-2xl border border-neutral-200 bg-white">
+                                {attachResults.map((result) => {
+                                  const active = attachSelectedChantierId === result.chantier_id;
+                                  return (
+                                    <button
+                                      key={result.group_key}
+                                      type="button"
+                                      onClick={() => selectAttachChantier(result.chantier_id)}
+                                      className={[
+                                        "w-full px-3 py-2 text-left text-sm transition hover:bg-neutral-50",
+                                        active ? "bg-neutral-100" : "bg-white",
+                                      ].join(" ")}
+                                    >
+                                      <div className="font-medium text-neutral-900">{result.chantier_label || result.chantier_id}</div>
+                                      <div className="mt-1 text-xs text-neutral-500">
+                                        {result.installateur || "Installateur inconnu"} · {chantierStatusLabel(result.status)}
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          {attachSelectedChantierId ? (
+                            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                              Chantier sélectionné : <strong>{attachSelectedChantierId}</strong>
+                            </div>
+                          ) : null}
+
+                          <label className="flex flex-col gap-1">
+                            <span className="text-sm font-medium text-neutral-700">Ou créer un nouveau chantier</span>
+                            <input
+                              className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm"
+                              placeholder="Nouvelle référence chantier"
+                              value={attachNewChantierId}
+                              onChange={(e) => {
+                                const next = e.target.value;
+                                setAttachNewChantierId(next);
+                                if (next.trim()) {
+                                  setAttachSelectedChantierId("");
+                                  setAttachSavSessions([]);
+                                  setAttachSelectedSavSessionId("");
+                                  setAttachCreateNewSav(true);
+                                }
+                              }}
+                            />
+                            {attachNewChantierId.trim() ? (
+                              <span className="text-xs text-neutral-500">SAV-001 sera utilisée pour ce nouveau chantier.</span>
+                            ) : null}
+                          </label>
+
+                          <div className="flex flex-col gap-2">
+                            <span className="text-sm font-medium text-neutral-700">Session SAV cible</span>
+                            <label className="flex items-center gap-2 text-sm text-neutral-700">
+                              <input
+                                type="radio"
+                                name="callAttachSavTarget"
+                                className="h-4 w-4"
+                                checked={attachCreateNewSav}
+                                onChange={() => setAttachCreateNewSav(true)}
+                                disabled={Boolean(attachNewChantierId.trim())}
+                              />
+                              {attachNewChantierId.trim() ? "SAV-001 pour ce nouveau chantier" : "Créer une nouvelle session SAV"}
+                            </label>
+                            <label className="flex items-center gap-2 text-sm text-neutral-700">
+                              <input
+                                type="radio"
+                                name="callAttachSavTarget"
+                                className="h-4 w-4"
+                                checked={!attachCreateNewSav}
+                                onChange={() => setAttachCreateNewSav(false)}
+                                disabled={!attachSelectedChantierId}
+                              />
+                              Rattacher à une session existante
+                            </label>
+                            {!attachCreateNewSav && attachSelectedChantierId ? (
+                              <select
+                                className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm"
+                                value={attachSelectedSavSessionId}
+                                onChange={(e) => setAttachSelectedSavSessionId(e.target.value)}
+                                disabled={attachSavSessions.length === 0}
+                              >
+                                {attachSavSessions.length === 0 ? (
+                                  <option value="">Aucune session SAV trouvée</option>
+                                ) : (
+                                  attachSavSessions.map((session) => (
+                                    <option key={session.sav_session_id} value={session.sav_session_id}>
+                                      {session.title || session.sav_session_id}
+                                    </option>
+                                  ))
+                                )}
+                              </select>
+                            ) : null}
+                          </div>
+
+                          <label className="flex flex-col gap-1">
+                            <span className="text-sm font-medium text-neutral-700">Acteur</span>
+                            <input
+                              className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm"
+                              value={attachActor}
+                              onChange={(e) => setAttachActor(e.target.value)}
+                            />
+                          </label>
+
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={attachSelectedCallConversation}
+                              disabled={attachLoading}
+                              className="rounded-2xl bg-neutral-950 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-60"
+                            >
+                              {attachLoading ? "Rattachement…" : "Confirmer le rattachement"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCallAttachOpen(false)}
+                              disabled={attachLoading}
+                              className="rounded-2xl border border-neutral-300 bg-white px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-60"
+                            >
+                              Annuler
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : !selectedItem ? (
                 <div className="mt-6 rounded-2xl border border-dashed border-neutral-200 bg-neutral-50 px-4 py-6 text-sm text-neutral-500">
                   Clique une carte pour ouvrir son review panel.
                 </div>
@@ -2444,4 +3102,148 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
       </main>
     </AppShell>
   );
+}
+
+function callScope(call: CallConversation) {
+  return safeStr(call.scope, "SAV_RELEVANT").toUpperCase();
+}
+
+function callPhoneOrContact(call: CallConversation) {
+  const contact = call.contact || {};
+  return firstNonEmpty(
+    call.external_phone,
+    contact.display,
+    contact.name,
+    contact.company,
+    contact.email,
+    "Contact inconnu",
+  );
+}
+
+function callProductLabel(call: CallConversation) {
+  const product = call.product;
+  if (typeof product === "string" || typeof product === "number") return String(product);
+  if (!product || typeof product !== "object") return "";
+
+  const row = product as Record<string, unknown>;
+  return firstNonEmpty(row.product_label, row.label, row.product_code, row.code);
+}
+
+function callCollaborators(call: CallConversation) {
+  const values = Array.isArray(call.perge_collaborators) ? call.perge_collaborators : [];
+  return values
+    .map((value) => {
+      if (typeof value === "string" || typeof value === "number") return String(value);
+      if (!value || typeof value !== "object") return "";
+      const row = value as Record<string, unknown>;
+      return firstNonEmpty(row.name, row.display, row.email, row.user_name);
+    })
+    .filter(Boolean);
+}
+
+function callTitle(call: CallConversation) {
+  const summary = safeStr(call.summary);
+  if (summary) return summary.split(/[.!?]\s+/)[0].slice(0, 90);
+  return callPhoneOrContact(call) === "Contact inconnu" ? "Appel téléphonique" : `Appel de ${callPhoneOrContact(call)}`;
+}
+
+function callDate(call: CallConversation) {
+  const value = call.started_at || call.ended_at;
+  if (!value) return "Date inconnue";
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? formatTs(numeric) : String(value);
+}
+
+function callDuration(seconds?: number | null) {
+  if (!seconds || seconds < 0) return "Durée inconnue";
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  const remaining = total % 60;
+  return minutes ? `${minutes} min ${String(remaining).padStart(2, "0")} s` : `${remaining} s`;
+}
+
+function callProcessingLabel(call: CallConversation) {
+  const processing = call.processing;
+  const status = typeof processing === "string" ? processing : safeStr(processing && processing.status);
+  const stage = typeof processing === "object" && processing ? safeStr(processing.stage) : "";
+  return status || stage || "Disponible";
+}
+
+function callAnalysisList(call: CallConversation, ...keys: string[]) {
+  const analysis = call.analysis || {};
+  for (const key of keys) {
+    const value = analysis[key];
+    if (Array.isArray(value)) {
+      const items = value
+        .map((item) => (typeof item === "string" || typeof item === "number" ? String(item) : safeStr((item as Record<string, unknown>)?.text || (item as Record<string, unknown>)?.label)))
+        .filter(Boolean);
+      if (items.length > 0) return items;
+      continue;
+    }
+    const text = safeStr(value);
+    if (text) return [text];
+  }
+  return [];
+}
+
+function callAnalysisSummary(call: CallConversation) {
+  return safeStr(call.analysis?.summary) || safeStr(call.analysis?.resume);
+}
+
+function callAnalysisTitle(call: CallConversation) {
+  return safeStr(call.analysis?.title) || "Analyse de l’appel";
+}
+
+function callMemberId(call: CallConversation) {
+  return safeStr(call.member_inbox_item_ids?.[0]);
+}
+
+function getCallConversations(overview?: InboxOverviewResponse | null) {
+  const topLevel = overview?.call_conversations;
+  if (Array.isArray(topLevel) && topLevel.length > 0) return topLevel;
+
+  const fromPayload = overview?.payload?.call_conversations;
+  if (Array.isArray(fromPayload) && fromPayload.length > 0) return fromPayload;
+
+  return Array.isArray(topLevel) ? topLevel : Array.isArray(fromPayload) ? fromPayload : [];
+}
+
+type TranscriptSegment = {
+  speaker: string;
+  text: string;
+  timestamp: string;
+};
+
+function transcriptSegments(detail: InboxItemDetail | null): TranscriptSegment[] {
+  if (!detail) return [];
+  const callPayload = detail.call || null;
+  const callTranscription = callPayload?.transcription;
+  const raw =
+    detail.transcription ||
+    detail.transcript ||
+    detail.segments ||
+    callTranscription ||
+    callPayload?.transcript;
+  const candidates: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).segments)
+    ? ((raw as Record<string, unknown>).segments as unknown[])
+    : [];
+
+  if (candidates.length === 0) {
+    const text = safeStr(detail.clean_content_text || detail.raw_content_text);
+    return text ? [{ speaker: "Transcription", text, timestamp: "" }] : [];
+  }
+
+  return candidates
+    .map((segment: unknown) => {
+      if (!segment || typeof segment !== "object") return null;
+      const row = segment as Record<string, unknown>;
+      return {
+        speaker: firstNonEmpty(row.speaker, row.speaker_label, row.role, "Interlocuteur"),
+        text: firstNonEmpty(row.text, row.content, row.transcript),
+        timestamp: firstNonEmpty(row.start, row.start_time, row.timestamp, row.offset),
+      };
+    })
+    .filter((segment): segment is { speaker: string; text: string; timestamp: string } => Boolean(segment?.text));
 }
