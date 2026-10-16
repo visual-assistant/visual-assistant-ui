@@ -31,6 +31,7 @@ type ChantierAggItem = {
 
   // Affichage liste: nom installateur (context.societe / context.installateur.company)
   installateur?: string | null;
+  produit?: string | null;
   numero_serie?: string | null;
 
   status?: string;
@@ -69,6 +70,11 @@ type SavSessionLite = {
   created_at?: number | null;
   updated_at?: number | null;
   status?: string | null;
+};
+
+type ProductOption = {
+  code: string;
+  label: string;
 };
 
 function formatTs(ts?: number | null) {
@@ -201,6 +207,7 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
       null) as any;
 
   const installer = installerCompany ?? installerName ?? null;
+  const produit = context?.produit ?? c?.stable?.produit ?? null;
   const numeroSerie =
     context?.numero_serie ??
     c?.stable?.numero_serie ??
@@ -260,6 +267,7 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
     chantier_id: chantierId,
     chantier_label: chantierLabel,
     installateur: installer ? String(installer).trim() : null,
+    produit: produit ? String(produit).trim() : null,
     numero_serie: numeroSerie ? String(numeroSerie).trim() : null,
     status: st,
     type: "chantier",
@@ -297,6 +305,7 @@ function TrashIcon({ className = "w-4 h-4" }: { className?: string }) {
 export default function SavSessionsListPage() {
   const [unattached, setUnattached] = useState<ChantierAggItem[]>([]);
   const [chantiers, setChantiers] = useState<ChantierAggItem[]>([]);
+  const [products, setProducts] = useState<ProductOption[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -631,6 +640,48 @@ export default function SavSessionsListPage() {
     fetchOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchProducts = async () => {
+      try {
+        const res = await fetch(buildUrl("/products"), { cache: "no-store" });
+        if (!res.ok) return;
+
+        const json = (await res.json()) as unknown;
+        const options: ProductOption[] = Array.isArray(json)
+          ? json
+              .map((p: any) => ({
+                code: String(p?.code || "").trim(),
+                label: String(p?.label || "").trim(),
+              }))
+              .filter((p) => p.code && p.label)
+          : [];
+
+        if (!cancelled) setProducts(options);
+      } catch {
+        // La colonne conservera la valeur brute si le catalogue est indisponible.
+      }
+    };
+
+    void fetchProducts();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const productLabel = (rawProduct?: string | null) => {
+    const raw = String(rawProduct || "").trim();
+    if (!raw) return "—";
+
+    const normalized = raw.toLowerCase();
+    const option = products.find(
+      (p) => p.code.toLowerCase() === normalized || p.label.toLowerCase() === normalized
+    );
+
+    return option?.label || raw;
+  };
 
   const filteredUnattached = useMemo(() => {
     const q = search.trim();
@@ -1058,6 +1109,7 @@ export default function SavSessionsListPage() {
             <col className="w-[170px]" />
             <col className="w-[170px]" />
             <col className="w-[170px]" />
+            <col className="w-[170px]" />
             <col className="w-[90px]" />
             <col className="w-[90px]" />
             <col className="w-[240px]" />
@@ -1070,6 +1122,7 @@ export default function SavSessionsListPage() {
                 <th className="px-4 py-4 text-left font-semibold">Propriétaire</th>
               ) : null}
               <th className="px-4 py-4 text-left font-semibold">Installateur</th>
+              <th className="px-4 py-4 text-left font-semibold">Produit</th>
               <th className="px-4 py-4 text-left font-semibold">Numéros</th>
               <th className="px-4 py-4 text-left font-semibold">Chantier</th>
               <th className="px-4 py-4 text-left font-semibold">Numéro de série</th>
@@ -1160,6 +1213,12 @@ export default function SavSessionsListPage() {
                   <td className="py-2 px-2 align-top">
                     <div className="text-xs text-neutral-700">
                       {c.installateur ? String(c.installateur) : "—"}
+                    </div>
+                  </td>
+
+                  <td className="py-2 px-2 align-top">
+                    <div className="text-xs text-neutral-700">
+                      {productLabel(c.produit)}
                     </div>
                   </td>
 
