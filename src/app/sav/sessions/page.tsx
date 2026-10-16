@@ -31,6 +31,7 @@ type ChantierAggItem = {
 
   // Affichage liste: nom installateur (context.societe / context.installateur.company)
   installateur?: string | null;
+  numero_serie?: string | null;
 
   status?: string;
   type?: string;
@@ -200,6 +201,10 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
       null) as any;
 
   const installer = installerCompany ?? installerName ?? null;
+  const numeroSerie =
+    context?.numero_serie ??
+    c?.stable?.numero_serie ??
+    null;
 
   const sessionIds: string[] = Array.isArray(links?.session_ids)
     ? links.session_ids
@@ -255,6 +260,7 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
     chantier_id: chantierId,
     chantier_label: chantierLabel,
     installateur: installer ? String(installer).trim() : null,
+    numero_serie: numeroSerie ? String(numeroSerie).trim() : null,
     status: st,
     type: "chantier",
     origins: ["chantier_json"],
@@ -647,6 +653,7 @@ export default function SavSessionsListPage() {
         ...(c.session_ids || []),
         ...(c.sender_numbers || []),
         c.installateur || "",
+        c.numero_serie || "",
         c.report_recipient_number || "",
       ]
         .filter(Boolean)
@@ -685,6 +692,7 @@ export default function SavSessionsListPage() {
         ...(c.session_ids || []),
         ...(c.sender_numbers || []),
         c.installateur || "",
+        c.numero_serie || "",
         c.report_recipient_number || "",
       ]
         .filter(Boolean)
@@ -1049,6 +1057,7 @@ export default function SavSessionsListPage() {
             <col className="w-[260px]" />
             <col className="w-[170px]" />
             <col className="w-[170px]" />
+            <col className="w-[170px]" />
             <col className="w-[90px]" />
             <col className="w-[90px]" />
             <col className="w-[240px]" />
@@ -1061,8 +1070,9 @@ export default function SavSessionsListPage() {
                 <th className="px-4 py-4 text-left font-semibold">Propriétaire</th>
               ) : null}
               <th className="px-4 py-4 text-left font-semibold">Installateur</th>
-              <th className="px-4 py-4 text-left font-semibold">Chantier</th>
               <th className="px-4 py-4 text-left font-semibold">Numéros</th>
+              <th className="px-4 py-4 text-left font-semibold">Chantier</th>
+              <th className="px-4 py-4 text-left font-semibold">Numéro de série</th>
               <th className="px-4 py-4 text-left font-semibold">Sessions</th>
               <th className="px-4 py-4 text-left font-semibold">Photos</th>
               <th className="px-4 py-4 text-left font-semibold">Actions</th>
@@ -1154,6 +1164,19 @@ export default function SavSessionsListPage() {
                   </td>
 
                   <td className="py-2 px-2 align-top">
+                    <div className="text-xs text-neutral-700">
+                      {(c.sender_numbers || []).slice(0, 2).map((n) => (
+                        <div key={n}>{n}</div>
+                      ))}
+                      {(c.sender_numbers || []).length > 2 && (
+                        <div className="text-neutral-500">
+                          +{(c.sender_numbers || []).length - 2}…
+                        </div>
+                      )}
+                    </div>
+                  </td>
+
+                  <td className="py-2 px-2 align-top">
                     <div className="flex flex-col gap-1">
                       <div className="font-medium">
                         {isRattachee ? (c.chantier_label || c.chantier_id) : "—"}
@@ -1170,14 +1193,7 @@ export default function SavSessionsListPage() {
 
                   <td className="py-2 px-2 align-top">
                     <div className="text-xs text-neutral-700">
-                      {(c.sender_numbers || []).slice(0, 2).map((n) => (
-                        <div key={n}>{n}</div>
-                      ))}
-                      {(c.sender_numbers || []).length > 2 && (
-                        <div className="text-neutral-500">
-                          +{(c.sender_numbers || []).length - 2}…
-                        </div>
-                      )}
+                      {c.numero_serie || "—"}
                     </div>
                   </td>
 
@@ -1286,7 +1302,7 @@ export default function SavSessionsListPage() {
             </span>
             <input
               className="h-12 w-full rounded-xl border border-slate-200 bg-white pl-11 pr-4 text-sm text-slate-900 shadow-sm outline-none placeholder:text-slate-400 focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
-              placeholder="Recherche (chantier / installateur / numéro...)"
+              placeholder="Recherche (chantier / installateur / numéro de série...)"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => {
