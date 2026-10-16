@@ -120,28 +120,95 @@ type CallConversation = {
   conversation_id: string;
   member_count?: number | null;
   member_inbox_item_ids?: string[] | null;
-  members?: Record<string, unknown>[] | null;
+  members?: CallConversationMember[] | null;
   external_phone?: string | null;
   contact?: Record<string, unknown> | null;
   perge_collaborators?: unknown[] | null;
   started_at?: number | string | null;
   ended_at?: number | string | null;
   duration_seconds?: number | null;
+  title?: string | null;
   summary?: string | null;
   nature?: string | null;
   scope?: string | null;
   sav_type?: string | null;
   product?: unknown;
   analysis?: Record<string, unknown> | null;
+  analysis_status?: string | null;
+  analysis_error?: string | null;
   linked_chantier_id?: string | null;
   continuity?: unknown;
   processing?: Record<string, unknown> | string | null;
 };
 
-type CallSyncJob = {
+type DiscoveredCall = {
+  discovery_key: string;
+  row_fingerprint?: string | null;
+  date_label?: string | null;
+  started_at?: string | number | null;
+  phone_labels?: string[] | null;
+  labels?: string[] | null;
+  crm?: {
+    status?: string | null;
+    matches?: Array<Record<string, unknown>> | null;
+  } | null;
+  processing_status?: string | null;
+  suggested_group?: string | null;
+  [key: string]: unknown;
+};
+
+type CallConversationMember = {
+  inbox_item_id?: string | null;
+  processing_status?: string | null;
+  summary?: string | null;
+  updated_at?: string | number | null;
+  started_at?: string | number | null;
+  ended_at?: string | number | null;
+  duration_seconds?: number | null;
+  external_phone?: string | null;
+  phone?: string | null;
+  contact?: Record<string, unknown> | null;
+  perge_collaborator?: unknown;
+  perge_collaborators?: unknown[] | null;
+  analysis?: Record<string, unknown> | null;
+  actions?: unknown;
+  uncertainties?: unknown;
+  [key: string]: unknown;
+};
+
+type GroupSuggestion = {
+  group_id: string;
+  phone?: string | null;
+  crm?: {
+    status?: string | null;
+    normalized_phone?: string | null;
+    matches?: Array<Record<string, unknown>> | null;
+  } | null;
+  call_row_indexes?: number[] | null;
+  call_fingerprints: string[];
+  reason?: string | null;
+  max_gap_minutes?: number | null;
+  duration_based?: boolean | null;
+  confidence?: "high" | "medium" | "low" | string | null;
+};
+
+type DiscoveryJob = {
   job_id?: string | null;
   status?: string | null;
   stage?: string | null;
+};
+
+type CallProcessJob = DiscoveryJob & {
+  total_count?: number | null;
+  processed_count?: number | null;
+  failed_count?: number | null;
+  completed_count?: number | null;
+  result?: {
+    crawler?: unknown;
+    import?: unknown;
+    transcription?: unknown;
+    analysis?: unknown;
+  } | null;
 };
 
 type InboxOverviewColumn = {
@@ -663,11 +730,11 @@ function CallConversationCard({
           </span>
         </div>
         <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
-          {memberCount} appel{memberCount > 1 ? "s" : ""}
+          {memberCount > 1 ? `${memberCount} appels regroupés` : "1 appel"}
         </span>
       </div>
 
-      <div className="mt-3 line-clamp-2 text-base font-semibold text-slate-950">
+      <div className="mt-3 text-base font-semibold text-slate-950">
         {callTitle(call)}
       </div>
       <div className="mt-2 text-sm text-slate-600">
@@ -676,15 +743,21 @@ function CallConversationCard({
       <div className="mt-1 text-sm text-slate-500">
         {callDate(call)} · {callDuration(call.duration_seconds)}
       </div>
-      {call.summary || callAnalysisSummary(call) ? (
+      {callConversationSummary(call) ? (
         <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-700">
-          {safeStr(call.summary) || callAnalysisSummary(call)}
+          {callConversationSummary(call)}
         </p>
       ) : null}
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
         {collaborators.length ? <span>{collaborators.join(", ")}</span> : <span>Collaborateur non renseigné</span>}
         <span>·</span>
         <span>{callProcessingLabel(call)}</span>
+        {safeStr(call.analysis_status).toUpperCase() === "AGGREGATED_COMPLETED" ? (
+          <span className="rounded-full bg-emerald-100 px-2 py-1 font-medium text-emerald-800">Synthèse disponible</span>
+        ) : null}
+        {safeStr(call.analysis_error) ? (
+          <span className="rounded-full bg-amber-100 px-2 py-1 font-medium text-amber-800">Synthèse groupée en fallback</span>
+        ) : null}
       </div>
       <div className="mt-2 text-xs font-medium text-slate-600">
         {call.linked_chantier_id ? `Chantier ${call.linked_chantier_id}` : "Non rattaché"}
@@ -797,11 +870,20 @@ export default function InboxSavPage() {
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState<string | null>(null);
   const [callTranscriptItem, setCallTranscriptItem] = useState<InboxItemDetail | null>(null);
+  const [callTranscriptMemberId, setCallTranscriptMemberId] = useState<string | null>(null);
   const [callAttachOpen, setCallAttachOpen] = useState(false);
   const [callAttachMemberId, setCallAttachMemberId] = useState<string | null>(null);
-  const [callSyncJob, setCallSyncJob] = useState<CallSyncJob | null>(null);
-  const [callSyncError, setCallSyncError] = useState<string | null>(null);
-  const callSyncStarted = useRef(false);
+  const [discoveredCalls, setDiscoveredCalls] = useState<DiscoveredCall[]>([]);
+  const [groupSuggestions, setGroupSuggestions] = useState<GroupSuggestion[]>([]);
+  const [discoveredTotalCount, setDiscoveredTotalCount] = useState<number | null>(null);
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [lookbackMinutes, setLookbackMinutes] = useState("180");
+  const [discoveryJob, setDiscoveryJob] = useState<DiscoveryJob | null>(null);
+  const [processJob, setProcessJob] = useState<CallProcessJob | null>(null);
+  const [selectedDiscoveryKeys, setSelectedDiscoveryKeys] = useState<Set<string>>(new Set());
+  const [processError, setProcessError] = useState<string | null>(null);
+  const [discoveryOpen, setDiscoveryOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [ignoringId, setIgnoringId] = useState<string | null>(null);
   const [scopeChangingId, setScopeChangingId] = useState<string | null>(null);
@@ -1088,66 +1170,148 @@ export default function InboxSavPage() {
     }
   };
 
-  const pollCallSync = async (jobId: string): Promise<void> => {
+  const fetchDiscoveredCalls = useCallback(async (lookbackValue: string, silent = false) => {
+    if (!silent) setDiscoveryLoading(true);
+    setDiscoveryError(null);
+
     try {
-      const res = await fetch(buildUrl(`/inbox/calls/sync/${encodeURIComponent(jobId)}`), {
+      const res = await fetch(
+        buildUrl("/inbox/calls/discovered", {
+          lookback_minutes: lookbackValue,
+          limit: "200",
+        }),
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error("discovered calls unavailable");
+      const data = (await res.json()) as {
+        calls?: unknown;
+        group_suggestions?: unknown;
+        count?: unknown;
+        total_count?: unknown;
+      };
+      setDiscoveredCalls(Array.isArray(data.calls) ? (data.calls as DiscoveredCall[]) : []);
+      setDiscoveredTotalCount(typeof data.total_count === "number" ? data.total_count : null);
+      setGroupSuggestions(
+        Array.isArray(data.group_suggestions)
+          ? (data.group_suggestions as GroupSuggestion[]).filter(
+              (group) => safeStr(group.group_id) && Array.isArray(group.call_fingerprints),
+            )
+          : [],
+      );
+    } catch (e) {
+      console.error("fetch /inbox/calls/discovered error", e);
+      setDiscoveryError("Impossible de charger les appels découverts.");
+    } finally {
+      if (!silent) setDiscoveryLoading(false);
+    }
+  }, []);
+
+  const pollCallDiscovery = useCallback(async (jobId: string): Promise<void> => {
+    try {
+      const res = await fetch(buildUrl(`/inbox/calls/discover/${encodeURIComponent(jobId)}`), {
         cache: "no-store",
       });
-      if (!res.ok) throw new Error("sync status unavailable");
-
-      const job = (await res.json()) as CallSyncJob;
-      setCallSyncJob({ ...job, job_id: job.job_id || jobId });
-
+      if (!res.ok) throw new Error("discovery status unavailable");
+      const job = (await res.json()) as DiscoveryJob;
+      setDiscoveryJob({ ...job, job_id: job.job_id || jobId });
       const status = safeStr(job.status).toLowerCase();
+
       if (status === "completed") {
-        await fetchOverview({ silent: true });
+        await fetchDiscoveredCalls(lookbackMinutes, true);
         return;
       }
-
       if (status === "failed") {
-        setCallSyncError("La synchronisation des appels n’a pas abouti. Les appels déjà disponibles restent consultables.");
+        setDiscoveryError("La recherche des appels récents a échoué.");
         return;
       }
-
-      window.setTimeout(() => void pollCallSync(jobId), 1500);
+      window.setTimeout(() => void pollCallDiscovery(jobId), 1500);
     } catch (e) {
-      console.error("poll call sync error", e);
-      setCallSyncError("La synchronisation des appels n’a pas abouti. Les appels déjà disponibles restent consultables.");
+      console.error("poll call discovery error", e);
+      setDiscoveryError("Impossible de suivre la recherche des appels récents.");
     }
-  };
+  }, [fetchDiscoveredCalls, lookbackMinutes]);
 
-  const startCallSync = async () => {
-    if (callSyncStarted.current) return;
-    callSyncStarted.current = true;
-    setCallSyncError(null);
-
+  const discoverRecentCalls = async () => {
+    setDiscoveryError(null);
+    setDiscoveryJob({ status: "queued", stage: "queued" });
     try {
-      const res = await fetch(buildUrl("/inbox/calls/sync"), {
+      const params = new URLSearchParams({
+        lookback_minutes: lookbackMinutes,
+        limit: "100",
+      });
+      const res = await fetch(buildUrl(`/inbox/calls/discover?${params.toString()}`), {
         method: "POST",
         cache: "no-store",
       });
-      if (!res.ok) throw new Error("call sync unavailable");
-
-      const payload = (await res.json()) as CallSyncJob;
-      const jobId = safeStr(payload.job_id);
-      setCallSyncJob(payload);
-      if (jobId) await pollCallSync(jobId);
+      if (!res.ok) throw new Error("discovery unavailable");
+      const job = (await res.json()) as DiscoveryJob & { already_running?: boolean };
+      setDiscoveryJob(job);
+      const jobId = safeStr(job.job_id);
+      if (jobId) await pollCallDiscovery(jobId);
+      else await fetchDiscoveredCalls(lookbackMinutes, true);
     } catch (e) {
-      console.error("start call sync error", e);
-      setCallSyncError("La synchronisation des appels n’a pas abouti. Les appels déjà disponibles restent consultables.");
+      console.error("discover recent calls error", e);
+      setDiscoveryError("La recherche des appels récents n’a pas pu démarrer.");
     }
   };
+
+  const pollCallProcess = useCallback(async (jobId: string): Promise<void> => {
+    try {
+      const res = await fetch(buildUrl(`/inbox/calls/process/${encodeURIComponent(jobId)}`), {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("process status unavailable");
+      const job = (await res.json()) as CallProcessJob;
+      setProcessJob({ ...job, job_id: job.job_id || jobId });
+      const status = safeStr(job.status).toLowerCase();
+
+      if (status === "completed") {
+        setSelectedDiscoveryKeys(new Set());
+        await Promise.all([fetchDiscoveredCalls(lookbackMinutes, true), fetchOverview({ silent: true })]);
+        return;
+      }
+      if (status === "failed") {
+        setProcessError("Le traitement des appels a échoué.");
+        await fetchDiscoveredCalls(lookbackMinutes, true);
+        return;
+      }
+      window.setTimeout(() => void pollCallProcess(jobId), 1500);
+    } catch (e) {
+      console.error("poll call process error", e);
+      setProcessError("Impossible de suivre le traitement des appels.");
+    }
+  }, [fetchDiscoveredCalls, fetchOverview, lookbackMinutes]);
+
+  const processSelectedCalls = async () => {
+    const discoveryKeys = Array.from(selectedDiscoveryKeys);
+    if (!discoveryKeys.length) return;
+    setProcessError(null);
+    try {
+      const res = await fetch(buildUrl("/inbox/calls/process"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ discovery_keys: discoveryKeys }),
+      });
+      if (!res.ok) throw new Error("call processing unavailable");
+      const job = (await res.json()) as CallProcessJob;
+      setProcessJob(job);
+      const jobId = safeStr(job.job_id);
+      if (jobId) await pollCallProcess(jobId);
+    } catch (e) {
+      console.error("process selected calls error", e);
+      setProcessError("Le traitement des appels n’a pas pu démarrer.");
+    }
+  };
+
+  useEffect(() => {
+    void fetchDiscoveredCalls("180");
+  }, [fetchDiscoveredCalls]);
 
   useEffect(() => {
     fetchOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelFilter]);
-
-  useEffect(() => {
-    void startCallSync();
-    // La synchronisation est volontairement déclenchée une seule fois au chargement.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const relevantColumn = useMemo(() => {
     return pickRelevantColumn(overview?.columns || []);
@@ -1197,7 +1361,7 @@ export default function InboxSavPage() {
     if (scope === "OUT_OF_SCOPE") return "OUT_OF_SCOPE";
 
     return "SAV_RELEVANT";
-  }, [selectedItem]);
+  }, [selectedItem, selectedCall]);
 
   const showRelevantColumn =
     !reviewPanelOpen || selectedColumnKey === "SAV_RELEVANT";
@@ -1654,12 +1818,13 @@ export default function InboxSavPage() {
     fetchInboxItemDetail(selectedItemId);
   }, [selectedItemId]);
 
-  const loadCallTranscript = async () => {
+  const loadCallTranscript = async (memberIdOverride?: string) => {
     if (!selectedCall) return;
-    const memberId = callMemberId(selectedCall);
+    const memberId = memberIdOverride || callMemberId(selectedCall);
     setCallTranscriptOpen(true);
     setCallTranscriptError(null);
     setCallTranscriptItem(null);
+    setCallTranscriptMemberId(memberId || null);
 
     if (!memberId) {
       setCallTranscriptError("Transcription non disponible");
@@ -1988,32 +2153,36 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
             </div>
           ) : null}
 
-          {callSyncJob && !callSyncError && safeStr(callSyncJob.status).toLowerCase() !== "completed" ? (
-            <div className="mt-4 flex items-center gap-2 rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span>
-                {safeStr(callSyncJob.stage).toLowerCase() === "crawler"
-                  ? "Récupération des appels récents…"
-                  : safeStr(callSyncJob.stage).toLowerCase() === "transcription"
-                  ? "Transcription des appels…"
-                  : safeStr(callSyncJob.stage).toLowerCase() === "analysis"
-                  ? "Préparation des résumés…"
-                  : safeStr(callSyncJob.stage).toLowerCase() === "queued"
-                  ? "Import des fichiers…"
-                  : "Synchronisation des appels…"}
-              </span>
-            </div>
-          ) : null}
-
-          {callSyncError ? (
-            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              {callSyncError}
-            </div>
-          ) : null}
          </div>
         </div>
 
         <div className="px-10 py-7">
+        <CallDiscoveryPanel
+          open={discoveryOpen}
+          onOpenChange={(nextOpen) => {
+            if (nextOpen) {
+              setSelectedItemId(null);
+              setSelectedCallId(null);
+            }
+            setDiscoveryOpen(nextOpen);
+          }}
+          calls={discoveredCalls}
+          groups={groupSuggestions}
+          loading={discoveryLoading}
+          error={discoveryError}
+          lookbackMinutes={lookbackMinutes}
+          onLookbackMinutesChange={setLookbackMinutes}
+          discoveryJob={discoveryJob}
+          onDiscover={() => void discoverRecentCalls()}
+          onRefresh={() => void fetchDiscoveredCalls(lookbackMinutes)}
+          totalHistoryCount={discoveredTotalCount}
+          selectedKeys={selectedDiscoveryKeys}
+          onSelectedKeysChange={setSelectedDiscoveryKeys}
+          processJob={processJob}
+          processError={processError}
+          onProcess={() => void processSelectedCalls()}
+        />
+
         {loading ? (
           <section className="rounded-2xl border border-slate-200 bg-white p-8 text-sm text-slate-500 shadow-sm">
             Chargement de l’Inbox SAV…
@@ -2045,6 +2214,7 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                   setCallAttachMemberId(null);
                   setCallTranscriptOpen(false);
                   setCallTranscriptItem(null);
+                  setCallTranscriptMemberId(null);
                   setCallTranscriptError(null);
                 }}
               />
@@ -2071,6 +2241,7 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                   setCallAttachMemberId(null);
                   setCallTranscriptOpen(false);
                   setCallTranscriptItem(null);
+                  setCallTranscriptMemberId(null);
                   setCallTranscriptError(null);
                 }}
               />
@@ -2147,12 +2318,22 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                   <section className="rounded-2xl border border-orange-200 bg-orange-50/25 p-4">
                     <h3 className="text-sm font-semibold text-neutral-900">Résumé</h3>
                     <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-neutral-800">
-                      {safeStr(selectedCall.summary) || "Résumé non disponible."}
+                      {callConversationSummary(selectedCall) || "Résumé non disponible."}
                     </p>
                   </section>
 
                   <section className="rounded-2xl border border-neutral-200 p-4">
                     <h3 className="text-sm font-semibold text-neutral-900">{callAnalysisTitle(selectedCall)}</h3>
+                    {safeStr(selectedCall.analysis_status).toUpperCase() === "AGGREGATED_COMPLETED" ? (
+                      <div className="mt-2 inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800">
+                        Synthèse de conversation disponible
+                      </div>
+                    ) : null}
+                    {safeStr(selectedCall.analysis_error) ? (
+                      <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        La synthèse groupée a échoué et le résultat affiché est un fallback. Cause : {safeStr(selectedCall.analysis_error)}
+                      </div>
+                    ) : null}
                     {callAnalysisSummary(selectedCall) ? (
                       <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-neutral-700">
                         {callAnalysisSummary(selectedCall)}
@@ -2180,6 +2361,58 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                     </div>
                   </section>
 
+                  {callMemberCount(selectedCall) > 1 && Array.isArray(selectedCall.members) ? (
+                    <section className="rounded-2xl border border-neutral-200 p-4">
+                      <details>
+                        <summary className="cursor-pointer text-sm font-semibold text-neutral-900">
+                          Détails des appels ({selectedCall.members.length})
+                        </summary>
+                        <div className="mt-4 space-y-3">
+                          {selectedCall.members.map((member, index) => {
+                            const memberId = safeStr(member.inbox_item_id) || safeStr(selectedCall.member_inbox_item_ids?.[index]);
+                            const memberActions = memberAnalysisList(member, "actions", "identified_actions", "actions_identifiees");
+                            const memberUncertainties = memberAnalysisList(member, "uncertainties", "incertitudes", "limites");
+                            return (
+                              <article key={memberId || index} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div>
+                                    <div className="text-sm font-semibold text-slate-900">Appel {index + 1}</div>
+                                    <div className="mt-1 text-xs text-slate-500">
+                                      {memberDate(member)} · {callDuration(member.duration_seconds)} · {memberCollaboratorLabel(member)}
+                                    </div>
+                                    <div className="mt-1 text-xs text-slate-500">
+                                      {firstNonEmpty(member.external_phone, member.phone, contactLabel(member.contact), "Contact inconnu")}
+                                    </div>
+                                  </div>
+                                  <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-slate-600">
+                                    {discoveredStatusLabel(member.processing_status)}
+                                  </span>
+                                </div>
+                                {safeStr(member.summary) ? (
+                                  <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-700">{safeStr(member.summary)}</p>
+                                ) : null}
+                                {memberActions.length || memberUncertainties.length ? (
+                                  <div className="mt-3 grid gap-3 text-xs text-slate-700 sm:grid-cols-2">
+                                    {memberActions.length ? <div><div className="font-semibold">Actions</div><ul className="mt-1 list-disc space-y-1 pl-4">{memberActions.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+                                    {memberUncertainties.length ? <div><div className="font-semibold text-amber-800">Incertitudes</div><ul className="mt-1 list-disc space-y-1 pl-4 text-amber-800">{memberUncertainties.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+                                  </div>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  disabled={!memberId}
+                                  onClick={() => void loadCallTranscript(memberId)}
+                                  className="mt-3 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Voir la transcription
+                                </button>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </details>
+                    </section>
+                  ) : null}
+
                   <section className="rounded-2xl border border-neutral-200 p-4">
                     <button
                       type="button"
@@ -2189,7 +2422,7 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                       }}
                       className="flex w-full items-center justify-between text-left text-sm font-semibold text-neutral-900"
                     >
-                      <span>{callTranscriptOpen ? "Masquer la transcription" : "Voir la transcription"}</span>
+                      <span>{callTranscriptOpen ? "Masquer la transcription" : callTranscriptMemberId ? "Voir la transcription du membre" : "Voir la transcription"}</span>
                       {callTranscriptOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                     </button>
                     {callTranscriptOpen ? (
@@ -3104,6 +3337,454 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
   );
 }
 
+function CallDiscoveryPanel({
+  open,
+  onOpenChange,
+  calls,
+  groups,
+  totalHistoryCount,
+  loading,
+  error,
+  lookbackMinutes,
+  onLookbackMinutesChange,
+  discoveryJob,
+  onDiscover,
+  onRefresh,
+  selectedKeys,
+  onSelectedKeysChange,
+  processJob,
+  processError,
+  onProcess,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  calls: DiscoveredCall[];
+  groups: GroupSuggestion[];
+  totalHistoryCount: number | null;
+  loading: boolean;
+  error: string | null;
+  lookbackMinutes: string;
+  onLookbackMinutesChange: (value: string) => void;
+  discoveryJob: DiscoveryJob | null;
+  onDiscover: () => void;
+  onRefresh: () => void;
+  selectedKeys: Set<string>;
+  onSelectedKeysChange: React.Dispatch<React.SetStateAction<Set<string>>>;
+  processJob: CallProcessJob | null;
+  processError: string | null;
+  onProcess: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open]);
+
+  const discoveryStatus = safeStr(discoveryJob?.status).toLowerCase();
+  const processStatus = safeStr(processJob?.status).toLowerCase();
+  const discoveryBusy = discoveryStatus === "queued" || discoveryStatus === "running";
+  const processBusy = processStatus === "queued" || processStatus === "running";
+  const allSelected = calls.length > 0 && calls.every((call) => selectedKeys.has(call.discovery_key));
+  const total = processJob?.total_count || 0;
+  const completed = processJob?.completed_count ?? processJob?.processed_count ?? 0;
+  const failed = processJob?.failed_count ?? 0;
+  const progress = total > 0 ? Math.min(100, Math.round(((completed + failed) / total) * 100)) : null;
+
+  const toggleKey = (key: string) => {
+    onSelectedKeysChange((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    onSelectedKeysChange((current) => {
+      const next = new Set(current);
+      if (allSelected) calls.forEach((call) => next.delete(call.discovery_key));
+      else calls.forEach((call) => next.add(call.discovery_key));
+      return next;
+    });
+  };
+
+  const toggleGroup = (group: GroupSuggestion) => {
+    onSelectedKeysChange((current) => {
+      const next = new Set(current);
+      const fingerprints = group.call_fingerprints || [];
+      const shouldSelect = fingerprints.some((key) => !next.has(key));
+      fingerprints.forEach((key) => (shouldSelect ? next.add(key) : next.delete(key)));
+      return next;
+    });
+  };
+
+  return (
+    <>
+      <section className="mb-7 rounded-2xl border border-orange-200 bg-orange-50/60 px-4 py-3 shadow-sm">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <button
+            type="button"
+            onClick={() => onOpenChange(true)}
+            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+          >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-orange-100 text-orange-700">☎</span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-slate-900">Appels récents</span>
+              <span className="block truncate text-xs font-normal text-slate-500">
+                {calls.length} appel{calls.length > 1 ? "s" : ""} trouvé{calls.length > 1 ? "s" : ""}
+                {totalHistoryCount !== null ? ` · ${totalHistoryCount} dans l’historique` : ""}
+                {` · ${selectedKeys.size} sélectionné(s)`}
+              </span>
+            </span>
+          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm font-medium text-slate-600" htmlFor="call-lookback-compact">Période</label>
+            <select
+              id="call-lookback-compact"
+              value={lookbackMinutes}
+              onChange={(event) => onLookbackMinutesChange(event.target.value)}
+              disabled={discoveryBusy || processBusy}
+              className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm"
+            >
+              <option value="60">1 heure</option>
+              <option value="180">3 heures</option>
+              <option value="600">10 heures</option>
+            </select>
+            <button
+              type="button"
+              onClick={onDiscover}
+              disabled={discoveryBusy || processBusy}
+              className="h-10 rounded-lg border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {discoveryBusy ? "Recherche…" : "Rechercher"}
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenChange(true)}
+              className="h-10 rounded-lg bg-orange-600 px-4 text-sm font-semibold text-white hover:bg-orange-700"
+            >
+              Afficher les appels
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {open ? (
+        <>
+          <button
+            type="button"
+            aria-label="Fermer la découverte des appels"
+            onClick={() => onOpenChange(false)}
+            className="fixed inset-0 z-40 cursor-default bg-slate-950/30 backdrop-blur-[1px]"
+          />
+          <aside className="fixed right-0 top-0 z-50 flex h-screen w-full max-w-[980px] flex-col overscroll-contain border-l border-slate-200 bg-white shadow-2xl">
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              className="absolute right-5 top-5 z-10 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-600 shadow-sm hover:bg-slate-50"
+            >
+              Fermer
+            </button>
+      <section className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+      <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-950">Découverte des appels récents</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Recherche 3CX manuelle, indépendante du filtre de canal sélectionné.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm font-medium text-slate-600" htmlFor="call-lookback">
+              Période
+            </label>
+            <select
+              id="call-lookback"
+              value={lookbackMinutes}
+              onChange={(event) => onLookbackMinutesChange(event.target.value)}
+              disabled={discoveryBusy || processBusy}
+              className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm"
+            >
+              <option value="60">1 heure</option>
+              <option value="180">3 heures</option>
+              <option value="600">10 heures</option>
+            </select>
+            <button
+              type="button"
+              onClick={onDiscover}
+              disabled={discoveryBusy || processBusy}
+              className="h-10 rounded-lg bg-slate-950 px-4 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {discoveryBusy ? "Recherche en cours…" : "Rechercher les appels récents"}
+            </button>
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={loading || discoveryBusy || processBusy}
+              className="h-10 rounded-lg border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Actualiser
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {error ? <div className="border-b border-rose-200 bg-rose-50 px-5 py-3 text-sm text-rose-700">{error}</div> : null}
+      {processError ? <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-800">{processError}</div> : null}
+
+      {processJob && processBusy ? (
+        <div className="border-b border-violet-200 bg-violet-50 px-5 py-4 text-sm text-violet-900">
+          <div className="flex items-center justify-between gap-3">
+            <span className="inline-flex items-center gap-2 font-medium">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              {callProcessStageLabel(processJob.stage)}
+            </span>
+            <span>{total > 0 ? `${completed + failed}/${total}` : "Progression en cours"}</span>
+          </div>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-violet-200">
+            <div
+              className={progress === null ? "h-full w-1/3 animate-pulse rounded-full bg-violet-700" : "h-full rounded-full bg-violet-700 transition-all"}
+              style={progress === null ? undefined : { width: `${progress}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {processJob && processStatus === "completed" ? (
+        <div className="border-b border-emerald-200 bg-emerald-50 px-5 py-3 text-sm text-emerald-800">
+          Traitement terminé : {processJob.completed_count ?? processJob.processed_count ?? 0} appel(s) traité(s)
+          {processJob.failed_count ? `, ${processJob.failed_count} échec(s)` : ""}.
+        </div>
+      ) : null}
+
+      {groups.length ? (
+        <div className="border-b border-violet-200 bg-violet-50/50 px-5 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <h3 className="text-sm font-semibold text-slate-900">Appels probablement liés</h3>
+              <span className="rounded-full border border-violet-200 bg-white px-2 py-0.5 text-xs font-medium text-violet-700">
+                {groups.length} groupe{groups.length > 1 ? "s" : ""}
+              </span>
+            </div>
+            <span className="hidden text-xs text-slate-500 sm:inline">Sélection rapide par groupe</span>
+          </div>
+          <div className="mt-2 flex snap-x gap-2 overflow-x-auto pb-1">
+            {groups.map((group) => {
+              const selected = group.call_fingerprints.length > 0 && group.call_fingerprints.every((key) => selectedKeys.has(key));
+              const crm = group.crm;
+              const crmMatches = Array.isArray(crm?.matches) ? crm.matches : [];
+              const crmStatus = safeStr(crm?.status).toLowerCase();
+              const crmLabel = crmStatus === "matched"
+                ? crmMatches.length > 1
+                  ? "Plusieurs correspondances CRM"
+                  : crmMatches[0]
+                    ? `${safeStr(crmMatches[0].name) || "Contact trouvé"}${safeStr(crmMatches[0].company) ? ` — ${safeStr(crmMatches[0].company)}` : ""}`
+                    : "Correspondance CRM trouvée"
+                : "";
+              const displayPhone = safeStr(crmMatches[0]?.phone) || safeStr(group.phone) || safeStr(crm?.normalized_phone);
+              return (
+                <div key={group.group_id} className="flex min-w-[270px] max-w-[310px] snap-start items-center justify-between gap-3 rounded-lg border border-violet-200 bg-white px-3 py-2 shadow-sm">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate text-sm font-semibold text-slate-900">{crmLabel || displayPhone || "Numéro inconnu"}</p>
+                    </div>
+                    <p className="truncate text-xs text-slate-500">{crmLabel ? displayPhone : "Correspondance CRM non disponible"}</p>
+                    <p className="mt-1 truncate text-xs text-slate-500">
+                      {group.call_fingerprints.length} appel{group.call_fingerprints.length > 1 ? "s" : ""}
+                      {group.max_gap_minutes !== null && group.max_gap_minutes !== undefined ? ` · ${group.max_gap_minutes} min max` : ""}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(group)}
+                    aria-label={selected ? `Désélectionner le groupe ${group.group_id}` : `Sélectionner le groupe ${group.group_id}`}
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-sm font-bold ${selected ? "border-violet-300 bg-violet-100 text-violet-800" : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"}`}
+                  >
+                    {selected ? "✓" : "+"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-3 text-sm">
+        <label className="inline-flex items-center gap-2 font-medium text-slate-700">
+          <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={!calls.length || processBusy} className="h-4 w-4 rounded border-slate-300" />
+          Tout sélectionner
+        </label>
+        <span className="text-slate-500">
+          {calls.length} appel(s) trouvé(s)
+          {totalHistoryCount !== null ? ` · ${totalHistoryCount} dans l’historique` : ""}
+          {` · ${selectedKeys.size} sélectionné(s)`}
+        </span>
+      </div>
+
+      {loading ? (
+        <div className="px-5 py-8 text-sm text-slate-500">Chargement des appels découverts…</div>
+      ) : calls.length ? (
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
+            <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="w-12 px-5 py-3" />
+                <th className="px-4 py-3">Date</th>
+                <th className="px-4 py-3">Collaborateur PERGE</th>
+                <th className="px-4 py-3">Téléphone</th>
+                <th className="px-4 py-3">Contact CRM</th>
+                <th className="px-4 py-3">Société / email</th>
+                <th className="px-4 py-3">Statut CRM</th>
+                <th className="px-4 py-3">Statut</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {calls.map((call) => {
+                const match = call.crm?.matches?.[0] || {};
+                const multiple = (call.crm?.matches?.length || 0) > 1;
+                return (
+                  <tr key={call.discovery_key} className={selectedKeys.has(call.discovery_key) ? "bg-sky-50" : "hover:bg-slate-50"}>
+                    <td className="px-5 py-3 align-top">
+                      <input type="checkbox" checked={selectedKeys.has(call.discovery_key)} onChange={() => toggleKey(call.discovery_key)} disabled={processBusy} className="h-4 w-4 rounded border-slate-300" />
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 align-top text-slate-700">{call.date_label || formatDiscoveryDate(call.started_at)}</td>
+                    <td className="px-4 py-3 align-top text-slate-700">{discoveredCollaborator(call)}</td>
+                    <td className="px-4 py-3 align-top font-medium text-slate-900">{call.phone_labels?.[0] || "—"}</td>
+                    <td className="px-4 py-3 align-top text-slate-700">
+                      {safeStr(match.name) || "Non trouvé"}
+                      {multiple ? <span className="mt-1 block text-xs text-amber-700">Plusieurs correspondances CRM</span> : null}
+                    </td>
+                    <td className="px-4 py-3 align-top text-slate-600">
+                      <div>{safeStr(match.company) || "—"}</div>
+                      <div className="text-xs">{safeStr(match.email) || "—"}</div>
+                    </td>
+                    <td className="px-4 py-3 align-top">
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+                        {crmStatusLabel(call.crm?.status)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 align-top"><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">{discoveredStatusLabel(call.processing_status)}</span></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="px-5 py-8 text-sm text-slate-500">Aucun appel découvert. Lancez une recherche pour récupérer les appels récents.</div>
+      )}
+
+      <div className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-white/95 px-5 py-4 backdrop-blur">
+        <span className="text-sm font-semibold text-slate-700">{selectedKeys.size} appel(s) sélectionné(s)</span>
+        <button type="button" onClick={onProcess} disabled={!selectedKeys.size || discoveryBusy || processBusy} className="rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50">
+          {processBusy ? "Traitement en cours…" : "Traiter les appels sélectionnés"}
+        </button>
+      </div>
+    </section>
+          </aside>
+        </>
+      ) : null}
+    </>
+  );
+}
+
+function discoveredCollaborator(call: DiscoveredCall) {
+  const labels = Array.isArray(call.labels) ? call.labels : [];
+  return labels.find((label) => !call.phone_labels?.includes(label)) || "Non identifié";
+}
+
+function formatDiscoveryDate(value?: string | number | null) {
+  if (!value) return "Date inconnue";
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? formatTs(numeric) : safeStr(value);
+}
+
+function discoveredStatusLabel(status?: string | null) {
+  const normalized = safeStr(status).toLowerCase();
+  if (normalized === "discovered") return "Découvert";
+  if (normalized === "processing") return "En traitement";
+  if (normalized === "completed") return "Traité";
+  if (normalized === "failed") return "Échec";
+  return status || "Disponible";
+}
+
+function crmStatusLabel(status?: string | null) {
+  const normalized = safeStr(status).toLowerCase();
+  if (normalized === "matched") return "Correspondance trouvée";
+  if (normalized === "unmatched") return "Non trouvé";
+  if (normalized === "multiple") return "Plusieurs correspondances";
+  return status || "Non vérifié";
+}
+
+function callProcessStageLabel(stage?: string | null) {
+  const normalized = safeStr(stage).toLowerCase();
+  if (normalized === "downloading") return "Téléchargement des appels…";
+  if (normalized === "importing") return "Import des appels…";
+  if (normalized === "transcribing") return "Transcription des appels…";
+  if (normalized === "analyzing") return "Analyse des appels…";
+  return "Traitement des appels…";
+}
+
+function callMemberCount(call: CallConversation) {
+  return call.member_count || call.member_inbox_item_ids?.length || call.members?.length || 1;
+}
+
+function callConversationSummary(call: CallConversation) {
+  const globalSummary = callAnalysisSummary(call);
+  return callMemberCount(call) > 1 ? globalSummary || safeStr(call.summary) : safeStr(call.summary) || globalSummary;
+}
+
+function contactLabel(contact?: Record<string, unknown> | null) {
+  if (!contact) return "";
+  return firstNonEmpty(contact.display, contact.name, contact.company, contact.email);
+}
+
+function memberDate(member: CallConversationMember) {
+  const value = member.started_at || member.updated_at || member.ended_at;
+  if (!value) return "Date inconnue";
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? formatTs(numeric) : safeStr(value);
+}
+
+function memberCollaboratorLabel(member: CallConversationMember) {
+  const values = Array.isArray(member.perge_collaborators)
+    ? member.perge_collaborators
+    : member.perge_collaborator !== undefined
+    ? [member.perge_collaborator]
+    : [];
+  return values
+    .map((value) => {
+      if (typeof value === "string" || typeof value === "number") return String(value);
+      if (!value || typeof value !== "object") return "";
+      const row = value as Record<string, unknown>;
+      return firstNonEmpty(row.name, row.display, row.email, row.user_name);
+    })
+    .filter(Boolean)
+    .join(", ") || "Collaborateur non renseigné";
+}
+
+function memberAnalysisList(member: CallConversationMember, ...keys: string[]) {
+  const analysis = member.analysis || {};
+  for (const key of keys) {
+    const value = member[key] ?? analysis[key];
+    if (Array.isArray(value)) {
+      const items = value
+        .map((item) => typeof item === "string" || typeof item === "number" ? String(item) : safeStr((item as Record<string, unknown>)?.text || (item as Record<string, unknown>)?.label))
+        .filter(Boolean);
+      if (items.length) return items;
+    } else {
+      const text = safeStr(value);
+      if (text) return [text];
+    }
+  }
+  return [];
+}
+
 function callScope(call: CallConversation) {
   return safeStr(call.scope, "SAV_RELEVANT").toUpperCase();
 }
@@ -3142,9 +3823,12 @@ function callCollaborators(call: CallConversation) {
 }
 
 function callTitle(call: CallConversation) {
+  const analysisTitle = safeStr(call.analysis?.title);
+  if (analysisTitle) return analysisTitle;
+  if (safeStr(call.title)) return safeStr(call.title);
   const summary = safeStr(call.summary);
-  if (summary) return summary.split(/[.!?]\s+/)[0].slice(0, 90);
-  return callPhoneOrContact(call) === "Contact inconnu" ? "Appel téléphonique" : `Appel de ${callPhoneOrContact(call)}`;
+  if (summary) return summary;
+  return "Appel téléphonique";
 }
 
 function callDate(call: CallConversation) {
