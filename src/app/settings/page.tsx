@@ -404,7 +404,6 @@ const bulkPipelineSteps = [
   { key: "upload_status", label: "Upload" },
   { key: "metadata_status", label: "Métadonnées" },
   { key: "index_status", label: "Indexation" },
-  { key: "technical_knowledge_status", label: "Connaissances TK" },
 ] as const;
 
 function cx(...parts: Array<string | false | null | undefined>) {
@@ -883,11 +882,8 @@ function bulkOverallLabel(item: BulkImportItem) {
   if (status === "IGNORED" || status === "SKIPPED") {
     return { label: "Ignoré", cls: "border-slate-200 bg-slate-100 text-slate-500" };
   }
-  if (
-    (status === "INDEXED" || bulkPipelineStatus(pipeline.index_status) === "DONE") &&
-    bulkPipelineStatus(pipeline.technical_knowledge_status) === "DONE"
-  ) {
-    return { label: "Indexé + TK", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+  if (status === "INDEXED" || bulkPipelineStatus(pipeline.index_status) === "DONE") {
+    return { label: "Indexé", cls: "border-emerald-200 bg-emerald-50 text-emerald-700" };
   }
   if (
     status === "RUNNING" ||
@@ -2741,30 +2737,7 @@ export default function SettingsPage() {
         await fetchIndex(id);
       }
 
-      setIndexingPhaseLabel("Extraction des connaissances techniques...");
-      const tkRes = await fetch(
-        buildUrl(`/product-documents/${encodeURIComponent(id)}/technical-knowledge/extract`),
-        { method: "POST", cache: "no-store" }
-      );
-      const tkPayload = await tkRes.json().catch(() => null);
-      if (!tkRes.ok) {
-        const text = tkPayload?.detail || tkPayload?.message || tkPayload?.error || "";
-        setIndexError(
-          text && String(text).length < 260
-            ? `Indexation PDF terminée, mais extraction TK échouée: ${text}`
-            : "Indexation PDF terminée, mais extraction des connaissances techniques échouée."
-        );
-        await refresh();
-        return;
-      }
-
-      const createdCount = technicalKnowledgeCreatedCount(tkPayload);
-      setIndexSuccess(
-        createdCount !== null
-          ? `${createdCount} connaissance${createdCount > 1 ? "s" : ""} technique${createdCount > 1 ? "s" : ""} créée${createdCount > 1 ? "s" : ""}.`
-          : "Extraction des connaissances techniques terminée."
-      );
-      await fetchTechnicalKnowledgeExtractions(id, true);
+      setIndexSuccess("Indexation PDF terminée.");
       await refresh();
       setSelectedDocId(id);
     } catch (e) {

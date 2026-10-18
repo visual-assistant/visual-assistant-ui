@@ -2,7 +2,7 @@
 
 import React from "react";
 
-export type ChantierDetailTab = "CHANTIER" | "SESSION" | "GUIDE" | "MESSAGES";
+export type ChantierDetailTab = "CHANTIER" | "SESSION" | "MESSAGES";
 
 type ChantierDetailHeaderTabsProps = {
   activeTab: ChantierDetailTab;
@@ -16,7 +16,6 @@ type ChantierDetailHeaderTabsProps = {
 const TABS: Array<{ key: ChantierDetailTab; label: string }> = [
   { key: "CHANTIER", label: "Info Chantier" },
   { key: "SESSION", label: "Session SAV" },
-  { key: "GUIDE", label: "Guide chantier" },
   { key: "MESSAGES", label: "Messages reçus" },
 ];
 

@@ -4,7 +4,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import AppShell from "../../../../components/AppShell";
 import ChantierDetailHeaderTabs from "../../../../components/ChantierDetailHeaderTabs";
-import GuideChantierReview from "../../../../components/GuideChantierReview";
 
 /**
  * Chantier détail — Étape 2.5 (READ-ONLY + Chantier stable fini)
@@ -89,25 +88,6 @@ function uniqStrings(values: string[]) {
     out.push(s);
   }
   return out;
-}
-
-function collectGuideIds(chantier: unknown): string[] {
-  const candidates = [
-    get(chantier, "guide_id", ""),
-    get(chantier, "guide.guide_id", ""),
-    get(chantier, "guide.id", ""),
-    get(chantier, "prevention.guide_id", ""),
-    get(chantier, "latest_guide_id", ""),
-    ...(Array.isArray(get(chantier, "guide_ids", [])) ? get(chantier, "guide_ids", []) : []),
-    ...(Array.isArray(get(chantier, "guides", []))
-      ? get(chantier, "guides", []).map((g: unknown) => get(g, "guide_id", "") || get(g, "id", "") || g)
-      : []),
-    ...(Array.isArray(get(chantier, "prevention.guides", []))
-      ? get(chantier, "prevention.guides", []).map((g: unknown) => get(g, "guide_id", "") || get(g, "id", "") || g)
-      : []),
-  ];
-
-  return uniqStrings(candidates.map((value) => safeStr(value)));
 }
 
 function arraysEqualIgnoreOrder(a: string[], b: string[]) {
@@ -908,30 +888,6 @@ type ProductOption = {
   label: string;
 };
 
-type ChantierGuideListItem = {
-  guide_id: string;
-  chantier_id?: string | null;
-  title?: string | null;
-  status?: string | null;
-  products?: string[] | null;
-  created_at?: number | string | null;
-  updated_at?: number | string | null;
-  points?: {
-    summary?: {
-      count?: number | null;
-      main_count?: number | null;
-      secondary_count?: number | null;
-      hidden_count?: number | null;
-    } | null;
-  } | null;
-};
-
-type ChantierGuidesResponse = {
-  statuses?: string[];
-  count?: number;
-  items?: ChantierGuideListItem[];
-};
-
 type AiImproveMeta = {
   model?: string | null;
   target?: string | null;
@@ -955,7 +911,7 @@ type AiImproveResponse = {
   result: AiImproveResult;
 };
 
-type MainTab = "CHANTIER" | "SESSION" | "GUIDE" | "MESSAGES";
+type MainTab = "CHANTIER" | "SESSION" | "MESSAGES";
 
 export default function ChantierDetailPage() {
   const [mainTab, setMainTab] = useState<MainTab>("SESSION");
@@ -991,7 +947,6 @@ export default function ChantierDetailPage() {
     if (
       requestedTab === "CHANTIER" ||
       requestedTab === "SESSION" ||
-      requestedTab === "GUIDE" ||
       requestedTab === "MESSAGES"
     ) {
       setMainTab(requestedTab as MainTab);
@@ -1178,59 +1133,6 @@ export default function ChantierDetailPage() {
 
   const kind = get(data, "kind", null);
   const chantier = get(data, "chantier", null);
-  const fallbackGuideIds = useMemo(() => collectGuideIds(chantier), [chantier]);
-  const [chantierGuides, setChantierGuides] = useState<ChantierGuideListItem[]>([]);
-  const [guidesLoading, setGuidesLoading] = useState(false);
-  const [guidesError, setGuidesError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-
-    if (!chantier || !key) {
-      setChantierGuides([]);
-      setGuidesLoading(false);
-      setGuidesError(null);
-      return () => {
-        alive = false;
-      };
-    }
-
-    setGuidesLoading(true);
-    setGuidesError(null);
-
-    fetch(`${API_BASE}/guides?chantier_id=${encodeURIComponent(key)}`, {
-      cache: "no-store",
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const txt = await res.text().catch(() => "");
-          throw new Error(`Erreur API /guides: HTTP ${res.status} — ${txt.slice(0, 160)}`);
-        }
-        return res.json() as Promise<ChantierGuidesResponse>;
-      })
-      .then((json) => {
-        if (!alive) return;
-        const items = Array.isArray(json?.items)
-          ? json.items.filter((item) => safeStr(item?.guide_id))
-          : [];
-        setChantierGuides(items);
-      })
-      .catch((e: unknown) => {
-        if (!alive) return;
-        setChantierGuides([]);
-        setGuidesError(e instanceof Error ? e.message : "Impossible de récupérer les guides chantier.");
-      })
-      .finally(() => {
-        if (alive) setGuidesLoading(false);
-      });
-
-    return () => {
-      alive = false;
-    };
-  }, [API_BASE, chantier, key]);
-
-  const primaryGuide = chantierGuides[0] || null;
-  const latestGuideId = safeStr(primaryGuide?.guide_id) || fallbackGuideIds[0] || "";
 
   // ✅ Chantier stable mapping (format Glass/Mat)
   const chantierTitle =
@@ -3591,38 +3493,6 @@ export default function ChantierDetailPage() {
                 : ""
             }
           />
-        ) : mainTab === "GUIDE" ? (
-          guidesLoading ? (
-            <div className="mx-auto max-w-7xl rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
-              Recherche du guide chantier...
-            </div>
-          ) : latestGuideId ? (
-            <>
-              {guidesError ? (
-                <div className="mx-auto mb-4 max-w-7xl rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  {guidesError}
-                  {fallbackGuideIds.length ? (
-                    <span className="ml-1">
-                      Un ancien identifiant de guide présent dans le chantier est utilisé en fallback.
-                    </span>
-                  ) : null}
-                </div>
-              ) : null}
-              <GuideChantierReview guideId={latestGuideId} embedded />
-            </>
-          ) : (
-            <div className="mx-auto max-w-5xl rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-12 text-center shadow-sm">
-              <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-400">
-                G
-              </div>
-              <h3 className="mt-3 text-sm font-semibold text-slate-950">
-                Aucun guide chantier généré pour ce chantier
-              </h3>
-              <p className="mx-auto mt-2 max-w-md text-sm text-slate-500">
-                Aucun guide n’a encore été retourné par le backend pour cet identifiant chantier.
-              </p>
-            </div>
-          )
         ) : (
           <div className="grid grid-cols-12 gap-7">
             {/* Left column */}
