@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import AppShell from "../../../../components/AppShell";
 import ChantierDetailHeaderTabs from "../../../../components/ChantierDetailHeaderTabs";
+import ProductDocumentsViewer from "../../../../components/ProductDocumentsViewer";
 
 /**
  * Chantier détail — Étape 2.5 (READ-ONLY + Chantier stable fini)
@@ -911,7 +912,7 @@ type AiImproveResponse = {
   result: AiImproveResult;
 };
 
-type MainTab = "CHANTIER" | "SESSION" | "MESSAGES";
+type MainTab = "CHANTIER" | "SESSION" | "DOCUMENTATION" | "MESSAGES";
 
 export default function ChantierDetailPage() {
   const [mainTab, setMainTab] = useState<MainTab>("SESSION");
@@ -947,6 +948,7 @@ export default function ChantierDetailPage() {
     if (
       requestedTab === "CHANTIER" ||
       requestedTab === "SESSION" ||
+      requestedTab === "DOCUMENTATION" ||
       requestedTab === "MESSAGES"
     ) {
       setMainTab(requestedTab as MainTab);
@@ -3493,6 +3495,8 @@ export default function ChantierDetailPage() {
                 : ""
             }
           />
+        ) : mainTab === "DOCUMENTATION" ? (
+          <ProductDocumentsViewer apiBase={API_BASE} chantierId={key} />
         ) : (
           <div className="grid grid-cols-12 gap-7">
             {/* Left column */}
