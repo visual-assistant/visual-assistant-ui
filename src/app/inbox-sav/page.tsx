@@ -141,6 +141,27 @@ type CallConversation = {
   processing?: Record<string, unknown> | string | null;
 };
 
+type CallChronologyBlock = {
+  id?: string | null;
+  speaker?: string | null;
+  text?: string | null;
+  turn_kind?: string | null;
+  questions?: string[] | null;
+  hypotheses?: string[] | null;
+  actions?: string[] | null;
+  resolution?: string | null;
+  pending?: boolean | null;
+  source_segments?: string[] | null;
+};
+
+type CallCommitment = {
+  text?: string | null;
+  type?: string | null;
+  status?: string | null;
+  responsible?: string | null;
+  source_segments?: string[] | null;
+};
+
 type DiscoveredCall = {
   discovery_key: string;
   row_fingerprint?: string | null;
@@ -329,11 +350,13 @@ function timeAgo(ts?: number | null) {
 }
 
 function pickDisplayName(item: InboxOverviewCard) {
-  const company = item.installateur?.company?.trim();
-  const name = item.installateur?.name?.trim();
+  const contact = item.installateur || {};
+  const name = contact.name?.trim();
+  const company = contact.company?.trim();
 
-  if (company) return company;
+  if (name && company) return `${name} · ${company}`;
   if (name) return name;
+  if (company) return company;
   if (item.sender_display?.trim()) return item.sender_display.trim();
   if (item.sender_email?.trim()) return item.sender_email.trim();
   if (item.sender_phone?.trim()) return item.sender_phone.trim();
@@ -2322,6 +2345,49 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                     </p>
                   </section>
 
+                  {callChronology(selectedCall).length ? (
+                    <section className="rounded-2xl border border-sky-200 bg-sky-50/30 p-4">
+                      <h3 className="text-sm font-semibold text-neutral-900">Chronologie de l’appel</h3>
+                      <div className="mt-4 space-y-3">
+                        {callChronology(selectedCall).map((block, index) => (
+                          <article key={safeStr(block.id) || `chronology-${index}`} className="rounded-xl border border-sky-100 bg-white p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="text-xs font-semibold uppercase tracking-wide text-sky-800">
+                                {safeStr(block.speaker, "Échange")} · {safeStr(block.turn_kind, "mixte")}
+                              </div>
+                              {block.pending ? (
+                                <span className="rounded-full bg-amber-100 px-2 py-1 text-[11px] font-medium text-amber-800">Point ouvert</span>
+                              ) : null}
+                            </div>
+                            <p className="mt-2 text-sm leading-relaxed text-neutral-800">{safeStr(block.text)}</p>
+                            {block.questions?.length ? <div className="mt-2 text-xs text-neutral-700"><span className="font-semibold">Questions :</span> {block.questions.join(" · ")}</div> : null}
+                            {block.hypotheses?.length ? <div className="mt-2 text-xs text-neutral-700"><span className="font-semibold">Hypothèses :</span> {block.hypotheses.join(" · ")}</div> : null}
+                            {block.actions?.length ? <div className="mt-2 text-xs text-neutral-700"><span className="font-semibold">Actions :</span> {block.actions.join(" · ")}</div> : null}
+                            {safeStr(block.resolution) ? <div className="mt-2 text-xs text-neutral-700"><span className="font-semibold">Résolution :</span> {safeStr(block.resolution)}</div> : null}
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+
+                  {callCommitments(selectedCall).length ? (
+                    <section className="rounded-2xl border border-emerald-200 bg-emerald-50/30 p-4">
+                      <h3 className="text-sm font-semibold text-neutral-900">Engagements détectés</h3>
+                      <div className="mt-3 space-y-2">
+                        {callCommitments(selectedCall).map((commitment, index) => (
+                          <div key={`${safeStr(commitment.text) || "commitment"}-${index}`} className="rounded-xl border border-emerald-100 bg-white p-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-medium text-emerald-800">{commitmentTypeLabel(commitment.type)}</span>
+                              <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-700">{commitmentStatusLabel(commitment.status)}</span>
+                            </div>
+                            <p className="mt-2 text-sm text-neutral-800">{safeStr(commitment.text)}</p>
+                            {safeStr(commitment.responsible) ? <p className="mt-1 text-xs text-neutral-500">Responsable : {safeStr(commitment.responsible)}</p> : null}
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+
                   <section className="rounded-2xl border border-neutral-200 p-4">
                     <h3 className="text-sm font-semibold text-neutral-900">{callAnalysisTitle(selectedCall)}</h3>
                     {safeStr(selectedCall.analysis_status).toUpperCase() === "AGGREGATED_COMPLETED" ? (
@@ -2381,7 +2447,7 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                                       {memberDate(member)} · {callDuration(member.duration_seconds)} · {memberCollaboratorLabel(member)}
                                     </div>
                                     <div className="mt-1 text-xs text-slate-500">
-                                      {firstNonEmpty(member.external_phone, member.phone, contactLabel(member.contact), "Contact inconnu")}
+                                      {firstNonEmpty(contactLabel(member.contact), member.external_phone, member.phone, "Contact inconnu")}
                                     </div>
                                   </div>
                                   <span className="rounded-full bg-white px-2 py-1 text-xs font-medium text-slate-600">
@@ -3739,9 +3805,43 @@ function callConversationSummary(call: CallConversation) {
   return callMemberCount(call) > 1 ? globalSummary || safeStr(call.summary) : safeStr(call.summary) || globalSummary;
 }
 
+function callChronology(call: CallConversation): CallChronologyBlock[] {
+  const value = call.analysis?.chronology;
+  return Array.isArray(value) ? value.filter((item): item is CallChronologyBlock => Boolean(item && typeof item === "object")) : [];
+}
+
+function callCommitments(call: CallConversation): CallCommitment[] {
+  const value = call.analysis?.commitments;
+  return Array.isArray(value) ? value.filter((item): item is CallCommitment => Boolean(item && typeof item === "object")) : [];
+}
+
+function commitmentTypeLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    piece_detachee: "Pièce détachée",
+    documentation: "Documentation",
+    verification: "Vérification",
+    retour_attendu: "Retour attendu",
+    autre: "Engagement",
+  };
+  return labels[safeStr(value)] || "Engagement";
+}
+
+function commitmentStatusLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    a_faire: "À faire",
+    en_attente_retour: "En attente d’un retour",
+    realisee: "Réalisée",
+    incertaine: "À confirmer",
+  };
+  return labels[safeStr(value)] || "Statut non précisé";
+}
+
 function contactLabel(contact?: Record<string, unknown> | null) {
   if (!contact) return "";
-  return firstNonEmpty(contact.display, contact.name, contact.company, contact.email);
+  const name = firstNonEmpty(contact.name);
+  const company = firstNonEmpty(contact.company);
+  const identity = name && company ? `${name} · ${company}` : firstNonEmpty(name, company);
+  return firstNonEmpty(identity, contact.display, contact.email);
 }
 
 function memberDate(member: CallConversationMember) {
@@ -3791,12 +3891,14 @@ function callScope(call: CallConversation) {
 
 function callPhoneOrContact(call: CallConversation) {
   const contact = call.contact || {};
+  const name = firstNonEmpty(contact.name);
+  const company = firstNonEmpty(contact.company);
+  const identity = name && company ? `${name} · ${company}` : firstNonEmpty(name, company);
   return firstNonEmpty(
-    call.external_phone,
+    identity,
     contact.display,
-    contact.name,
-    contact.company,
     contact.email,
+    call.external_phone,
     "Contact inconnu",
   );
 }
