@@ -3,8 +3,8 @@
 /* The fetch effects reset their local loading/selection state before starting a request. */
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Hash, Layers } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, Expand, Hash, Layers, Minimize } from "lucide-react";
 
 type ProductDocument = {
   document_id: string;
@@ -80,6 +80,8 @@ export default function ProductDocumentsViewer({ apiBase, chantierId }: ProductD
   const [indexLoading, setIndexLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
 
   const documents = catalog?.documents ?? [];
   const selectedDocument = documents.find((item) => item.document_id === selectedDocumentId) ?? null;
@@ -87,6 +89,26 @@ export default function ProductDocumentsViewer({ apiBase, chantierId }: ProductD
     if (!selectedDocumentId) return "";
     return `${apiBase}/product-documents/${encodeURIComponent(selectedDocumentId)}/file#page=${page}`;
   }, [apiBase, page, selectedDocumentId]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === viewerRef.current);
+    };
+
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    if (!viewerRef.current) return;
+
+    if (document.fullscreenElement === viewerRef.current) {
+      await document.exitFullscreen();
+      return;
+    }
+
+    await viewerRef.current.requestFullscreen();
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -265,17 +287,34 @@ export default function ProductDocumentsViewer({ apiBase, chantierId }: ProductD
           </div>
         </aside>
 
-        <div className="col-span-12 flex min-h-[780px] min-w-0 flex-col bg-slate-100 lg:col-span-9 lg:min-h-[calc(100vh+120px)]">
+        <div
+          ref={viewerRef}
+          className={[
+            "col-span-12 flex min-h-[780px] min-w-0 flex-col bg-slate-100 lg:col-span-9 lg:min-h-[calc(100vh+120px)]",
+            isFullscreen ? "h-screen w-screen lg:min-h-0" : "",
+          ].join(" ")}
+        >
           <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
             <div className="min-w-0 truncate text-sm font-semibold text-slate-900">{selectedDocument?.title || "Document produit"}</div>
-            <div className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-500">Page {page}{index?.stats?.page_count ? ` / ${index.stats.page_count}` : ""}</div>
+            <div className="flex shrink-0 items-center gap-2">
+              <div className="rounded-lg bg-slate-100 px-2 py-1 text-xs text-slate-500">Page {page}{index?.stats?.page_count ? ` / ${index.stats.page_count}` : ""}</div>
+              <button
+                type="button"
+                onClick={() => void toggleFullscreen()}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-900"
+                title={isFullscreen ? "Quitter le plein écran" : "Afficher le visualiseur en plein écran"}
+                aria-label={isFullscreen ? "Quitter le plein écran" : "Afficher le visualiseur en plein écran"}
+              >
+                {isFullscreen ? <Minimize className="h-4 w-4" /> : <Expand className="h-4 w-4" />}
+              </button>
+            </div>
           </div>
           {fileUrl ? (
             <iframe
               key={fileUrl}
               title={selectedDocument?.title || "Visualiseur PDF"}
               src={fileUrl}
-              className="h-[740px] min-h-[740px] w-full flex-1 border-0 lg:h-[calc(100vh+60px)] lg:min-h-[780px]"
+              className={isFullscreen ? "min-h-0 w-full flex-1 border-0" : "h-[740px] min-h-[740px] w-full flex-1 border-0 lg:h-[calc(100vh+60px)] lg:min-h-[780px]"}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-sm text-slate-500">Sélectionnez un document.</div>

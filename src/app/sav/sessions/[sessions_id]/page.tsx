@@ -1473,6 +1473,7 @@ export default function ChantierDetailPage() {
 
   // 4) activeNoteId state + init fallback
   const [activeNoteId, setActiveNoteId] = useState<string>("");
+  const [expandedNoteIds, setExpandedNoteIds] = useState<Set<string>>(new Set());
 
   // init: si activeNoteId absent ou invalide, choisir la plus récente, sinon "__draft__"
   useEffect(() => {
@@ -1662,10 +1663,40 @@ export default function ChantierDetailPage() {
   const [noteText, setNoteText] = useState<string>("");
   const [noteDirty, setNoteDirty] = useState<boolean>(false);
 
+  const noteHasChanges = useMemo(() => {
+    if (noteDirty) return true;
+
+    // Un brouillon local contenant du texte doit pouvoir être enregistré,
+    // même si son contenu a été injecté autrement que par onChange.
+    if (activeNoteId === "__draft__" || !activeNoteRaw) {
+      return Boolean(noteText.trim());
+    }
+
+    const persistedTarget = normalizeTargetCode(get(activeNoteRaw, "target", "INTERNE"));
+    const persistedChannel =
+      persistedTarget === "INTERNE"
+        ? "NONE"
+        : normalizeChannelCode(get(activeNoteRaw, "channel", "WHATSAPP"));
+    const persistedText = safeStr(get(activeNoteRaw, "text", ""), "");
+
+    return (
+      noteText !== persistedText ||
+      noteTarget !== persistedTarget ||
+      noteChannel !== persistedChannel
+    );
+  }, [activeNoteId, activeNoteRaw, noteChannel, noteDirty, noteTarget, noteText]);
+
+  // Une note existante contenant du texte reste enregistrable, même si elle
+  // vient d'être créée automatiquement à partir d'un résumé d'appel.
+  const canSaveNote = noteHasChanges || (
+    activeNoteId !== "__draft__" && Boolean(noteText.trim())
+  );
+
   // Etat autosave
   type NoteSaveState = "idle" | "saving" | "saved" | "error";
   const [noteSaveState, setNoteSaveState] = useState<NoteSaveState>("idle");
   const [noteSaveError, setNoteSaveError] = useState<string | null>(null);
+  const [noteHistoryNotice, setNoteHistoryNotice] = useState<string | null>(null);
 
   type NotePublishState = "idle" | "publishing" | "published" | "error";
   const [notePublishState, setNotePublishState] = useState<NotePublishState>("idle");
@@ -1908,6 +1939,7 @@ export default function ChantierDetailPage() {
 
       setNoteSaveState("saved");
       setNoteDirty(false);
+      setNoteHistoryNotice("Note enregistrée dans l’historique.");
 
       await fetchSavItem();
 
@@ -1931,7 +1963,7 @@ export default function ChantierDetailPage() {
       setNoteSaveState("error");
       setNoteSaveError(e?.message || "Erreur enregistrement");
     }
-  }, [ensureNoteExists, patchNote, currentUser, noteTarget, noteChannel, noteText, fetchSavItem]);
+  }, [activeNoteId, ensureNoteExists, patchNote, currentUser, noteTarget, noteChannel, noteText, fetchSavItem]);
 
   const publishNoteNow = useCallback(async () => {
     try {
@@ -4417,6 +4449,12 @@ export default function ChantierDetailPage() {
                       <div className="mt-2 text-xs text-red-600">{noteDeleteError}</div>
                     ) : null}
 
+                    {noteHistoryNotice ? (
+                      <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                        {noteHistoryNotice}
+                      </div>
+                    ) : null}
+
                     {/* Upload inputs invisibles */}
                     <input
                       ref={uploadVisualInputRef}
@@ -4690,7 +4728,7 @@ export default function ChantierDetailPage() {
                         <div className="flex items-start gap-3">
                           <Button
                             className="h-11 px-5 text-sm"
-                            disabled={uploadBusy || !noteDirty || noteSaveState === "saving"}
+                            disabled={uploadBusy || !canSaveNote || noteSaveState === "saving"}
                             onClick={saveNoteNow}
                           >
                             Enregistrer
@@ -4721,7 +4759,7 @@ export default function ChantierDetailPage() {
                               <span className="text-red-600">
                                 Erreur{noteSaveError ? `: ${noteSaveError}` : ""}
                               </span>
-                            ) : noteDirty ? (
+                            ) : noteHasChanges ? (
                               <span className="text-neutral-500">Non enregistré</span>
                             ) : (
                               <span className="text-neutral-400"> </span>
@@ -5084,8 +5122,8 @@ export default function ChantierDetailPage() {
                           const isActive = n.id === activeNoteId;
 
                           const excerpt = (n.text || "").trim();
-                          const short =
-                            excerpt.length > 140 ? `${excerpt.slice(0, 140)}…` : excerpt;
+                          const isExpanded = expandedNoteIds.has(n.id);
+                          const canExpand = excerpt.length > 280 || excerpt.split("\n").length > 4;
 
                           return (
                             <div
@@ -5113,9 +5151,31 @@ export default function ChantierDetailPage() {
                                     ) : null}
                                   </div>
 
-                                  <div className="mt-2 text-sm text-neutral-900">
-                                    {short || <span className="text-neutral-400">—</span>}
+                                  <div
+                                    className={cx(
+                                      "mt-2 whitespace-pre-wrap break-words text-sm text-neutral-900",
+                                      canExpand && !isExpanded ? "line-clamp-4" : "",
+                                    )}
+                                  >
+                                    {excerpt || <span className="text-neutral-400">—</span>}
                                   </div>
+
+                                  {canExpand ? (
+                                    <button
+                                      type="button"
+                                      className="mt-2 text-xs font-medium text-indigo-700 hover:text-indigo-900"
+                                      onClick={() =>
+                                        setExpandedNoteIds((current) => {
+                                          const next = new Set(current);
+                                          if (next.has(n.id)) next.delete(n.id);
+                                          else next.add(n.id);
+                                          return next;
+                                        })
+                                      }
+                                    >
+                                      {isExpanded ? "Réduire" : "Afficher toute la note"}
+                                    </button>
+                                  ) : null}
 
                                   <div className="mt-2 text-xs text-neutral-500">
                                     Inclut: {n.inputCount} input · {n.outputCount} output · {n.fileCount} fichier

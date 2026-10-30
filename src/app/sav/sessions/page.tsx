@@ -127,6 +127,18 @@ function normalizeStatusForFilter(st?: string) {
   return s;
 }
 
+function resolveProductLabel(rawProduct: string | null | undefined, products: ProductOption[]) {
+  const raw = String(rawProduct || "").trim();
+  if (!raw) return "—";
+
+  const normalized = raw.toLowerCase();
+  const option = products.find(
+    (p) => p.code.toLowerCase() === normalized || p.label.toLowerCase() === normalized
+  );
+
+  return option?.label || raw;
+}
+
 const STATUS_OPTIONS = [
   { value: "A_TRAITER", label: "À traiter" },
   { value: "EN_ATTENTE_INTERNE", label: "En attente interne" },
@@ -317,6 +329,7 @@ export default function SavSessionsListPage() {
   // filtres
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [ownerFilter, setOwnerFilter] = useState<string>(""); // ✅ AJOUT
+  const [productFilter, setProductFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
 
   // ✅ user dropdown
@@ -672,26 +685,39 @@ export default function SavSessionsListPage() {
   }, []);
 
   const productLabel = (rawProduct?: string | null) => {
-    const raw = String(rawProduct || "").trim();
-    if (!raw) return "—";
-
-    const normalized = raw.toLowerCase();
-    const option = products.find(
-      (p) => p.code.toLowerCase() === normalized || p.label.toLowerCase() === normalized
-    );
-
-    return option?.label || raw;
+    return resolveProductLabel(rawProduct, products);
   };
+
+  const productFilterOptions = useMemo(() => {
+    const labels = new Set<string>();
+
+    for (const product of products) {
+      const label = product.label.trim();
+      if (label) labels.add(label);
+    }
+
+    for (const row of [...chantiers, ...unattached]) {
+      const label = resolveProductLabel(row.produit, products);
+      if (label !== "—") labels.add(label);
+    }
+
+    return Array.from(labels).sort((a, b) => a.localeCompare(b, "fr"));
+  }, [chantiers, products, unattached]);
 
   const filteredUnattached = useMemo(() => {
     const q = search.trim();
     const qn = normalizeStr(q);
     const statusNorm = (statusFilter || "").trim().toUpperCase();
+    const productNorm = normalizeStr(productFilter);
 
     return unattached.filter((c) => {
       if (statusNorm) {
         const st = normalizeStatusForFilter(c.status);
         if (st !== statusNorm) return false;
+      }
+
+      if (productNorm && normalizeStr(resolveProductLabel(c.produit, products)) !== productNorm) {
+        return false;
       }
 
       if (!qn) return true;
@@ -713,13 +739,14 @@ export default function SavSessionsListPage() {
 
       return hay.includes(qn);
     });
-  }, [unattached, search, statusFilter]);
+  }, [unattached, search, statusFilter, productFilter, products]);
 
   const filteredChantiers = useMemo(() => {
     const q = search.trim();
     const qn = normalizeStr(q);
     const statusNorm = (statusFilter || "").trim().toUpperCase();
     const ownerNorm = (ownerFilter || "").trim().toLowerCase();
+    const productNorm = normalizeStr(productFilter);
 
     return chantiers.filter((c) => {
       if (statusNorm) {
@@ -730,6 +757,10 @@ export default function SavSessionsListPage() {
       if (ownerNorm) {
         const o = (c.owner || "Xavier Briffa").toString().trim().toLowerCase();
         if (o !== ownerNorm) return false;
+      }
+
+      if (productNorm && normalizeStr(resolveProductLabel(c.produit, products)) !== productNorm) {
+        return false;
       }
 
       if (!qn) return true;
@@ -752,7 +783,7 @@ export default function SavSessionsListPage() {
 
       return hay.includes(qn);
     });
-  }, [chantiers, search, statusFilter, ownerFilter]);
+  }, [chantiers, search, statusFilter, ownerFilter, productFilter, products]);
 
   const openAttachModal = (row: ChantierAggItem) => {
     setAttachTarget(row);
@@ -1354,8 +1385,8 @@ export default function SavSessionsListPage() {
         </div>
 
         
-        <div className="flex items-center gap-4">
-          <div className="relative flex-1">
+        <div className="flex w-full flex-wrap items-center gap-4">
+          <div className="relative min-w-[260px] flex-1">
             <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
               ⌕
             </span>
@@ -1371,14 +1402,31 @@ export default function SavSessionsListPage() {
           </div>
 
           <select
+            className="h-12 min-w-48 rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none hover:bg-slate-50"
+            value={productFilter}
+            onChange={(e) => setProductFilter(e.target.value)}
+            title="Filtrer par produit"
+          >
+            <option value="">Tous les produits</option>
+            {productFilterOptions.map((label) => (
+              <option key={label} value={label}>
+                {label}
+              </option>
+            ))}
+          </select>
+
+          <select
             className="h-12 rounded-xl border border-slate-200 bg-white px-4 text-sm text-slate-900 shadow-sm outline-none hover:bg-slate-50"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             title="Filtrer par statut"
           >
-            <option value="">Statut : Tous</option>
-            <option value="A_TRAITER">Statut : À traiter</option>
-            <option value="RESOLU">Statut : Résolu</option>
+            <option value="">Tous les statuts</option>
+            {STATUS_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
 
           <select
@@ -1387,10 +1435,10 @@ export default function SavSessionsListPage() {
             onChange={(e) => setOwnerFilter(e.target.value)}
             title="Filtrer par propriétaire"
           >
-            <option value="">Propriétaire : Tous</option>
+            <option value="">Tous les propriétaires</option>
             {USERS.map((u) => (
               <option key={u} value={u}>
-                Propriétaire : {u}
+                {u}
               </option>
             ))}
           </select>
