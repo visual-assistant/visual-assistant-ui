@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   FileText,
   Inbox,
+  ListTodo,
   Settings,
   Sparkles,
   Wrench,
@@ -32,6 +33,12 @@ const navItems = [
     href: "/sav/sessions",
     icon: FileText,
     match: ["/sav/sessions"],
+  },
+  {
+    label: "Tâches",
+    href: "/tasks",
+    icon: ListTodo,
+    match: ["/tasks"],
   },
   {
     label: "Paramètres",

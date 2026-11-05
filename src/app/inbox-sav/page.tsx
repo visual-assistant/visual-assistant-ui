@@ -889,6 +889,7 @@ export default function InboxSavPage() {
 
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
+  const [requestedCallId, setRequestedCallId] = useState<string | null>(null);
   const [callTranscriptOpen, setCallTranscriptOpen] = useState(false);
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
   const [callTranscriptError, setCallTranscriptError] = useState<string | null>(null);
@@ -901,7 +902,7 @@ export default function InboxSavPage() {
   const [discoveredTotalCount, setDiscoveredTotalCount] = useState<number | null>(null);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
-  const [lookbackMinutes, setLookbackMinutes] = useState("180");
+  const [lookbackMinutes, setLookbackMinutes] = useState("60");
   const [discoveryJob, setDiscoveryJob] = useState<DiscoveryJob | null>(null);
   const [processJob, setProcessJob] = useState<CallProcessJob | null>(null);
   const [selectedDiscoveryKeys, setSelectedDiscoveryKeys] = useState<Set<string>>(new Set());
@@ -1328,7 +1329,7 @@ export default function InboxSavPage() {
   };
 
   useEffect(() => {
-    void fetchDiscoveredCalls("180");
+    void fetchDiscoveredCalls("60");
   }, [fetchDiscoveredCalls]);
 
   useEffect(() => {
@@ -1348,6 +1349,23 @@ export default function InboxSavPage() {
     () => (channelFilter === "ALL" || channelFilter === "VOICE_CALL" ? getCallConversations(overview) : []),
     [overview, channelFilter],
   );
+
+  useEffect(() => {
+    const callId = new URLSearchParams(window.location.search).get("call_id");
+    if (callId) setRequestedCallId(callId);
+  }, []);
+
+  useEffect(() => {
+    if (!requestedCallId || !callConversations.length) return;
+    const requestedCall = callConversations.find(
+      (call) => call.conversation_id === requestedCallId,
+    );
+    if (!requestedCall) return;
+
+    setSelectedItemId(null);
+    setSelectedCallId(requestedCall.conversation_id);
+    setRequestedCallId(null);
+  }, [callConversations, requestedCallId]);
   const relevantCalls = useMemo(
     () => callConversations.filter((call) => callScope(call) !== "OUT_OF_SCOPE"),
     [callConversations],
@@ -3518,8 +3536,9 @@ function CallDiscoveryPanel({
               className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm"
             >
               <option value="60">1 heure</option>
-              <option value="180">3 heures</option>
+              <option value="240">4 heures</option>
               <option value="600">10 heures</option>
+              <option value="1440">24 heures</option>
             </select>
             <button
               type="button"
@@ -3577,8 +3596,9 @@ function CallDiscoveryPanel({
               className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm"
             >
               <option value="60">1 heure</option>
-              <option value="180">3 heures</option>
+              <option value="240">4 heures</option>
               <option value="600">10 heures</option>
+              <option value="1440">24 heures</option>
             </select>
             <button
               type="button"
