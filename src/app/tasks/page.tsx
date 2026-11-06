@@ -55,8 +55,28 @@ function isCallSource(sourceType: string | null | undefined) {
   );
 }
 
-function isClientResponsible(responsible: string | null | undefined) {
-  return /^client\b/i.test((responsible || "").trim());
+function responsibleKey(responsible: string | null | undefined) {
+  return (responsible || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function isInternalResponsible(responsible: string | null | undefined) {
+  const key = responsibleKey(responsible);
+  if (!key) return false;
+
+  if (key.includes("servicetechnique") || key === "perge") return true;
+
+  return new Set([
+    "xavierbriffa",
+    "florentboeuf",
+    "florentbuf",
+    "williamperge",
+    "wperge",
+    "denislaffont",
+  ]).has(key);
 }
 
 function formatDate(value: number | string | null | undefined) {
@@ -145,7 +165,7 @@ export default function TasksPage() {
   };
 
   const visibleTasks = useMemo(
-    () => tasks.filter((task) => !isClientResponsible(task.responsible)),
+    () => tasks.filter((task) => isInternalResponsible(task.responsible)),
     [tasks],
   );
   const responsibleOptions = useMemo(

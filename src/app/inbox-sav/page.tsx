@@ -495,6 +495,22 @@ function formatTs(ts?: number | null) {
   }
 }
 
+function sortableTimestamp(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return 0;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed / 1000 : 0;
+}
+
+function inboxEntryTimestamp(entry: InboxOverviewCard | CallConversation): number {
+  if ("conversation_id" in entry) {
+    return sortableTimestamp(entry.ended_at || entry.started_at);
+  }
+  return sortableTimestamp(entry.last_message_at || entry.updated_at || entry.received_at);
+}
+
 function buildAttachChantierResultFromJson(c: Record<string, any>): AttachChantierResult | null {
   const chantierId = String(
     c?.chantier_id ??
@@ -832,6 +848,11 @@ function ColumnSection({
       ? "bg-amber-500"
       : "bg-neutral-300";
 
+  const entries = [
+    ...items.map((item) => ({ kind: "item" as const, value: item })),
+    ...calls.map((call) => ({ kind: "call" as const, value: call })),
+  ].sort((a, b) => inboxEntryTimestamp(b.value) - inboxEntryTimestamp(a.value));
+
   return (
     <section className={`min-h-[640px] rounded-2xl border p-5 shadow-sm ${toneClasses}`}>
       <div className="mb-4 flex items-start justify-between gap-3">
@@ -854,25 +875,26 @@ function ColumnSection({
         </div>
       ) : (
         <div className="flex flex-col gap-3">
-          {items.map((item) => (
-            <InboxCard
-              key={item.inbox_item_id}
-              item={item}
-              selected={selectedId === item.inbox_item_id}
-              onSelect={() => onSelect(item)}
-              onIgnore={() => onIgnore(item)}
-              onToggleScope={() => onToggleScope(item)}
-              scopeChanging={scopeChangingId === item.inbox_item_id}
-            />
-          ))}
-          {calls.map((call) => (
-            <CallConversationCard
-              key={call.conversation_id}
-              call={call}
-              selected={selectedCallId === call.conversation_id}
-              onSelect={() => onSelectCall(call)}
-            />
-          ))}
+           {entries.map((entry) =>
+             entry.kind === "item" ? (
+               <InboxCard
+                 key={entry.value.inbox_item_id}
+                 item={entry.value}
+                 selected={selectedId === entry.value.inbox_item_id}
+                 onSelect={() => onSelect(entry.value)}
+                 onIgnore={() => onIgnore(entry.value)}
+                 onToggleScope={() => onToggleScope(entry.value)}
+                 scopeChanging={scopeChangingId === entry.value.inbox_item_id}
+               />
+             ) : (
+               <CallConversationCard
+                 key={entry.value.conversation_id}
+                 call={entry.value}
+                 selected={selectedCallId === entry.value.conversation_id}
+                 onSelect={() => onSelectCall(entry.value)}
+               />
+             ),
+           )}
         </div>
       )}
     </section>
@@ -2159,7 +2181,7 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-sm font-semibold text-slate-700">Canal :</span>
 
-            {(["ALL", "EMAIL", "WHATSAPP", "VOICE_CALL"] as const).map((value) => {
+            {(["ALL", "VOICE_CALL", "WHATSAPP", "EMAIL"] as const).map((value) => {
               const active = channelFilter === value;
               const label =
                 value === "ALL"
@@ -2400,6 +2422,11 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                             </div>
                             <p className="mt-2 text-sm text-neutral-800">{safeStr(commitment.text)}</p>
                             {safeStr(commitment.responsible) ? <p className="mt-1 text-xs text-neutral-500">Responsable : {safeStr(commitment.responsible)}</p> : null}
+                             {safeStr((commitment as CallCommitment & { source_member_label?: string }).source_member_label) ? (
+                               <p className="mt-1 text-xs font-medium text-violet-700">
+                                 Source : {safeStr((commitment as CallCommitment & { source_member_label?: string }).source_member_label)}
+                               </p>
+                             ) : null}
                           </div>
                         ))}
                       </div>
@@ -2481,6 +2508,43 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
                                     {memberUncertainties.length ? <div><div className="font-semibold text-amber-800">Incertitudes</div><ul className="mt-1 list-disc space-y-1 pl-4 text-amber-800">{memberUncertainties.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
                                   </div>
                                 ) : null}
+                                 {memberChronology(member).length || memberCommitments(member).length ? (
+                                   <details className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                                     <summary className="cursor-pointer text-xs font-semibold text-slate-700">
+                                       Voir les segments et engagements de cet appel
+                                     </summary>
+                                     <div className="mt-3 space-y-3">
+                                       {memberChronology(member).length ? (
+                                         <div>
+                                           <div className="text-xs font-semibold uppercase tracking-wide text-sky-800">Segments sémantiques</div>
+                                           <div className="mt-2 space-y-2">
+                                             {memberChronology(member).map((block, blockIndex) => (
+                                               <div key={safeStr(block.id) || `member-chronology-${index}-${blockIndex}`} className="rounded-lg border border-sky-100 bg-sky-50/40 p-2 text-xs">
+                                                 <div className="font-semibold text-sky-800">{safeStr(block.speaker, "Échange")} · {safeStr(block.turn_kind, "mixte")}</div>
+                                                 <div className="mt-1 text-slate-700">{safeStr(block.text)}</div>
+                                                 {block.pending ? <div className="mt-1 font-medium text-amber-700">Point ouvert</div> : null}
+                                               </div>
+                                             ))}
+                                           </div>
+                                         </div>
+                                       ) : null}
+                                       {memberCommitments(member).length ? (
+                                         <div>
+                                           <div className="text-xs font-semibold uppercase tracking-wide text-emerald-800">Engagements</div>
+                                           <div className="mt-2 space-y-2">
+                                             {memberCommitments(member).map((commitment, commitmentIndex) => (
+                                               <div key={`${safeStr(commitment.text) || "member-commitment"}-${commitmentIndex}`} className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-2 text-xs text-slate-700">
+                                                 <div className="font-semibold text-emerald-800">{commitmentTypeLabel(commitment.type)} · {commitmentStatusLabel(commitment.status)}</div>
+                                                 <div className="mt-1">{safeStr(commitment.text)}</div>
+                                                 {safeStr(commitment.responsible) ? <div className="mt-1 text-slate-500">Responsable : {safeStr(commitment.responsible)}</div> : null}
+                                               </div>
+                                             ))}
+                                           </div>
+                                         </div>
+                                       ) : null}
+                                     </div>
+                                   </details>
+                                 ) : null}
                                 <button
                                   type="button"
                                   disabled={!memberId}
@@ -3903,6 +3967,20 @@ function memberAnalysisList(member: CallConversationMember, ...keys: string[]) {
     }
   }
   return [];
+}
+
+function memberChronology(member: CallConversationMember): CallChronologyBlock[] {
+  const value = member.analysis?.chronology;
+  return Array.isArray(value)
+    ? value.filter((item): item is CallChronologyBlock => Boolean(item && typeof item === "object"))
+    : [];
+}
+
+function memberCommitments(member: CallConversationMember): CallCommitment[] {
+  const value = member.analysis?.commitments;
+  return Array.isArray(value)
+    ? value.filter((item): item is CallCommitment => Boolean(item && typeof item === "object"))
+    : [];
 }
 
 function callScope(call: CallConversation) {

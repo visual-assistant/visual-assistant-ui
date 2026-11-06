@@ -259,6 +259,60 @@ type UiInboundPhoto = {
   url: string;
 };
 
+type UiCallChronologyBlock = {
+  id?: string | null;
+  speaker?: string | null;
+  text?: string | null;
+  turn_kind?: string | null;
+  questions?: string[] | null;
+  hypotheses?: string[] | null;
+  actions?: string[] | null;
+  resolution?: string | null;
+  pending?: boolean | null;
+};
+
+type UiCallCommitment = {
+  text?: string | null;
+  type?: string | null;
+  status?: string | null;
+  responsible?: string | null;
+};
+
+type UiCallMember = {
+  inbox_item_id?: string | null;
+  summary?: string | null;
+  started_at?: any;
+  duration_seconds?: number | null;
+  contact?: Record<string, unknown> | null;
+  perge_collaborators?: unknown[] | null;
+  analysis?: Record<string, any> | null;
+  transcription?: Record<string, any> | null;
+};
+
+type UiCallConversation = {
+  conversation_id?: string | null;
+  member_count?: number | null;
+  member_inbox_item_ids?: string[] | null;
+  members?: UiCallMember[] | null;
+  external_phone?: string | null;
+  contact?: Record<string, unknown> | null;
+  perge_collaborators?: unknown[] | null;
+  started_at?: any;
+  ended_at?: any;
+  duration_seconds?: number | null;
+  title?: string | null;
+  summary?: string | null;
+  nature?: string | null;
+  scope?: string | null;
+  sav_type?: string | null;
+  product?: unknown;
+  analysis?: Record<string, any> | null;
+  analysis_status?: string | null;
+  analysis_error?: string | null;
+  linked_chantier_id?: string | null;
+  transcription?: Record<string, any> | null;
+};
+
 type UiInboundMessage = {
   id: string;
   channel: "WHATSAPP" | "EMAIL" | string;
@@ -277,6 +331,8 @@ type UiInboundMessage = {
   attachmentCount: number;
   photos: UiInboundPhoto[];
   attachments: UiInboundAttachment[];
+  call?: UiCallConversation | null;
+  callAnalysis?: Record<string, any> | null;
 };
 
 type UiInboundSummary = {
@@ -330,19 +386,6 @@ function noteStatusTone(code: "DRAFT" | "SENT" | "FAILED"): "neutral" | "success
   if (code === "SENT") return "success";
   if (code === "FAILED") return "warning";
   return "neutral";
-}
-
-function pickMostRecentNoteId(notes: UiSavNote[]): string {
-  if (!notes.length) return "";
-
-  const score = (n: UiSavNote) => {
-    // updatedAt / createdAt peuvent être des timestamps epoch seconds,
-    // parfois convertis en string par safeStr().
-    return toTs(n.updatedAt) || toTs(n.createdAt) || 0;
-  };
-
-  const sorted = [...notes].sort((a, b) => score(b) - score(a));
-  return sorted[0]?.id || "";
 }
 
 function statusTone(statusLabel: string): "warning" | "neutral" | "success" | "info" {
@@ -440,6 +483,7 @@ function normalizeInboundChannelLabel(channel: any): string {
   const s = safeStr(channel, "").toUpperCase();
   if (s === "WHATSAPP") return "WhatsApp";
   if (s === "EMAIL") return "Email";
+  if (s === "VOICE_CALL") return "Appel";
   return s || "Canal inconnu";
 }
 
@@ -450,6 +494,7 @@ function normalizeInboundKindLabel(kind: any, channel: any): string {
   if (k === "caption") return "Légende photo";
   if (k === "message") return "Message";
   if (k === "email") return "Email";
+  if (k === "voice_call" || c === "VOICE_CALL") return "Appel téléphonique";
   if (k === "whatsapp_thread") return "Fil WhatsApp";
   if (k === "email_thread") return "Email";
   if (c === "WHATSAPP") return "Fil WhatsApp";
@@ -461,6 +506,7 @@ function inboundChannelTone(channel: any): string {
   const s = safeStr(channel, "").toUpperCase();
   if (s === "WHATSAPP") return "bg-emerald-100 text-emerald-800 ring-emerald-200";
   if (s === "EMAIL") return "bg-blue-100 text-blue-800 ring-blue-200";
+  if (s === "VOICE_CALL") return "bg-violet-100 text-violet-800 ring-violet-200";
   return "bg-neutral-100 text-neutral-700 ring-neutral-200";
 }
 
@@ -468,7 +514,82 @@ function inboundChannelIcon(channel: any): string {
   const s = safeStr(channel, "").toUpperCase();
   if (s === "WHATSAPP") return "💬";
   if (s === "EMAIL") return "✉️";
+  if (s === "VOICE_CALL") return "☎";
   return "📥";
+}
+
+function callAnalysisChronology(call?: UiCallConversation | null): UiCallChronologyBlock[] {
+  const value = call?.analysis?.chronology;
+  return Array.isArray(value) ? value.filter((item): item is UiCallChronologyBlock => Boolean(item && typeof item === "object")) : [];
+}
+
+function callAnalysisCommitments(call?: UiCallConversation | null): UiCallCommitment[] {
+  const value = call?.analysis?.commitments;
+  return Array.isArray(value) ? value.filter((item): item is UiCallCommitment => Boolean(item && typeof item === "object")) : [];
+}
+
+function memberCallChronology(member: UiCallMember): UiCallChronologyBlock[] {
+  const value = member.analysis?.chronology;
+  return Array.isArray(value) ? value.filter((item): item is UiCallChronologyBlock => Boolean(item && typeof item === "object")) : [];
+}
+
+function memberCallCommitments(member: UiCallMember): UiCallCommitment[] {
+  const value = member.analysis?.commitments;
+  return Array.isArray(value) ? value.filter((item): item is UiCallCommitment => Boolean(item && typeof item === "object")) : [];
+}
+
+function callSemanticSegmentCount(call?: UiCallConversation | null): number {
+  const globalCount = callAnalysisChronology(call).length;
+  if (globalCount > 0) return globalCount;
+  return (call?.members || []).reduce((total, member) => total + memberCallChronology(member).length, 0);
+}
+
+function callCommitmentCount(call?: UiCallConversation | null): number {
+  const globalCount = callAnalysisCommitments(call).length;
+  if (globalCount > 0) return globalCount;
+  return (call?.members || []).reduce((total, member) => total + memberCallCommitments(member).length, 0);
+}
+
+function callAnalysisList(call: UiCallConversation | null | undefined, key: string): string[] {
+  const value = call?.analysis?.[key];
+  if (!Array.isArray(value)) return value ? [safeStr(value)] : [];
+  return value
+    .map((item) => (typeof item === "string" || typeof item === "number" ? String(item) : safeStr(item?.text || item?.label)))
+    .filter(Boolean);
+}
+
+function callProductLabel(call?: UiCallConversation | null): string {
+  const product = call?.product;
+  if (typeof product === "string" || typeof product === "number") return String(product);
+  if (!product || typeof product !== "object") return "";
+  const row = product as Record<string, unknown>;
+  return safeStr(row.product_label || row.label || row.product_code || row.code);
+}
+
+function callContactLabel(call?: UiCallConversation | null): string {
+  const contact = call?.contact || {};
+  return safeStr(contact.name) || safeStr(contact.company) || safeStr(contact.display) || safeStr(call?.external_phone) || "Contact inconnu";
+}
+
+function commitmentTypeLabel(value?: string | null): string {
+  const labels: Record<string, string> = {
+    piece_detachee: "Pièce détachée",
+    documentation: "Documentation",
+    verification: "Vérification",
+    retour_attendu: "Retour attendu",
+    autre: "Engagement",
+  };
+  return labels[safeStr(value)] || "Engagement";
+}
+
+function commitmentStatusLabel(value?: string | null): string {
+  const labels: Record<string, string> = {
+    a_faire: "À faire",
+    en_attente_retour: "En attente d’un retour",
+    realisee: "Réalisée",
+    incertaine: "À confirmer",
+  };
+  return labels[safeStr(value)] || "Statut non précisé";
 }
 
 function MessagesRecusTab({
@@ -480,6 +601,9 @@ function MessagesRecusTab({
   summary: UiInboundSummary;
   selectedSessionLabel: string;
 }) {
+  const [selectedCallMessage, setSelectedCallMessage] = useState<UiInboundMessage | null>(null);
+  const selectedCall = selectedCallMessage?.call || null;
+
   return (
     <div className="mx-auto max-w-7xl">
       <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
@@ -548,6 +672,8 @@ function MessagesRecusTab({
                             ? "bg-emerald-100 ring-emerald-200"
                             : msg.channel === "EMAIL"
                               ? "bg-blue-100 ring-blue-200"
+                              : msg.channel === "VOICE_CALL"
+                                ? "bg-violet-100 ring-violet-200"
                               : "bg-slate-100 ring-slate-200",
                         )}
                       >
@@ -601,6 +727,31 @@ function MessagesRecusTab({
                         {msg.text ? (
                           <div className="mb-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-900">
                             {msg.text}
+                          </div>
+                        ) : null}
+
+                        {msg.channel === "VOICE_CALL" && msg.call ? (
+                          <div className="mb-3 rounded-xl border border-violet-200 bg-violet-50/70 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div>
+                                <div className="text-xs font-semibold uppercase tracking-wide text-violet-800">
+                                  Analyse de l’appel
+                                </div>
+                                <div className="mt-1 text-sm text-violet-950">
+                                  {callSemanticSegmentCount(msg.call)} segment{callSemanticSegmentCount(msg.call) > 1 ? "s" : ""}
+                                  {callCommitmentCount(msg.call)
+                                    ? ` · ${callCommitmentCount(msg.call)} engagement${callCommitmentCount(msg.call) > 1 ? "s" : ""}`
+                                    : ""}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedCallMessage(msg)}
+                                className="rounded-xl bg-violet-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-violet-800"
+                              >
+                                Voir l’analyse complète
+                              </button>
+                            </div>
                           </div>
                         ) : null}
 
@@ -746,6 +897,185 @@ function MessagesRecusTab({
           </div>
         </aside>
       </div>
+
+      {selectedCall ? (
+        <>
+          <button
+            type="button"
+            aria-label="Fermer l’analyse de l’appel"
+            onClick={() => setSelectedCallMessage(null)}
+            className="fixed inset-0 z-40 cursor-default bg-slate-950/30 backdrop-blur-[1px]"
+          />
+          <aside className="fixed right-0 top-0 z-50 h-screen w-full max-w-[640px] overflow-y-auto border-l border-slate-200 bg-white p-7 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-semibold text-slate-950">Analyse de l’appel</h2>
+                <p className="mt-1 text-sm text-slate-500">Détail de l’analyse rattachée à ce chantier.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedCallMessage(null)}
+                className="rounded-xl px-3 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100"
+              >
+                Fermer
+              </button>
+            </div>
+
+            <div className="mt-6 flex flex-col gap-5">
+              <section className="rounded-2xl bg-violet-50 p-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-3 py-1 text-xs font-medium text-violet-800">
+                    <span aria-hidden="true">☎</span> Appel téléphonique
+                  </span>
+                  <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800">
+                    {safeStr(selectedCall.scope).toUpperCase() === "OUT_OF_SCOPE" ? "Hors périmètre" : "SAV pertinent"}
+                  </span>
+                </div>
+                <h3 className="mt-3 text-xl font-semibold text-slate-950">
+                  {safeStr(selectedCall.analysis?.title) || safeStr(selectedCall.title) || "Appel téléphonique"}
+                </h3>
+                <p className="mt-1 text-sm text-slate-600">{callContactLabel(selectedCall)}</p>
+                <p className="mt-1 text-sm text-slate-500">
+                  {formatHumanDate(selectedCall.started_at) || "Date inconnue"}
+                  {selectedCall.duration_seconds ? ` · ${Math.round(selectedCall.duration_seconds / 60)} min` : ""}
+                  {selectedCall.member_count && selectedCall.member_count > 1 ? ` · ${selectedCall.member_count} appels regroupés` : ""}
+                </p>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">Métadonnées</h3>
+                <dl className="mt-3 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
+                  <div><dt className="text-xs text-slate-500">Collaborateur(s) PERGE</dt><dd className="font-medium text-slate-800">{(selectedCall.perge_collaborators || []).map((item) => typeof item === "string" ? item : safeStr((item as Record<string, unknown>)?.name || (item as Record<string, unknown>)?.display)).filter(Boolean).join(", ") || "Non renseigné"}</dd></div>
+                  <div><dt className="text-xs text-slate-500">Produit</dt><dd className="font-medium text-slate-800">{callProductLabel(selectedCall) || "Non détecté"}</dd></div>
+                  <div><dt className="text-xs text-slate-500">Catégorie SAV</dt><dd className="font-medium text-slate-800">{selectedCall.sav_type || "Non qualifiée"}</dd></div>
+                  <div><dt className="text-xs text-slate-500">Chantier</dt><dd className="font-medium text-slate-800">{selectedCall.linked_chantier_id || "Rattaché à ce chantier"}</dd></div>
+                </dl>
+              </section>
+
+              <section className="rounded-2xl border border-orange-200 bg-orange-50/25 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">Résumé</h3>
+                <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
+                  {safeStr(selectedCall.analysis?.summary) || safeStr(selectedCall.summary) || "Résumé non disponible."}
+                </p>
+              </section>
+
+              {callAnalysisChronology(selectedCall).length ? (
+                <section className="rounded-2xl border border-sky-200 bg-sky-50/30 p-4">
+                  <h3 className="text-sm font-semibold text-slate-900">Chronologie de l’appel</h3>
+                  <div className="mt-4 space-y-3">
+                    {callAnalysisChronology(selectedCall).map((block, index) => (
+                      <article key={safeStr(block.id) || `chronology-${index}`} className="rounded-xl border border-sky-100 bg-white p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-sky-800">
+                            {safeStr(block.speaker, "Échange")} · {safeStr(block.turn_kind, "mixte")}
+                          </div>
+                          {block.pending ? <span className="rounded-full bg-amber-100 px-2 py-1 text-[11px] font-medium text-amber-800">Point ouvert</span> : null}
+                        </div>
+                        <p className="mt-2 text-sm leading-relaxed text-slate-800">{safeStr(block.text)}</p>
+                        {block.questions?.length ? <div className="mt-2 text-xs text-slate-700"><span className="font-semibold">Questions :</span> {block.questions.join(" · ")}</div> : null}
+                        {block.hypotheses?.length ? <div className="mt-2 text-xs text-slate-700"><span className="font-semibold">Hypothèses :</span> {block.hypotheses.join(" · ")}</div> : null}
+                        {block.actions?.length ? <div className="mt-2 text-xs text-slate-700"><span className="font-semibold">Actions :</span> {block.actions.join(" · ")}</div> : null}
+                        {safeStr(block.resolution) ? <div className="mt-2 text-xs text-slate-700"><span className="font-semibold">Résolution :</span> {safeStr(block.resolution)}</div> : null}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {callAnalysisCommitments(selectedCall).length ? (
+                <section className="rounded-2xl border border-emerald-200 bg-emerald-50/30 p-4">
+                  <h3 className="text-sm font-semibold text-slate-900">Engagements détectés</h3>
+                  <div className="mt-3 space-y-2">
+                    {callAnalysisCommitments(selectedCall).map((commitment, index) => (
+                      <div key={`${safeStr(commitment.text) || "commitment"}-${index}`} className="rounded-xl border border-emerald-100 bg-white p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-medium text-emerald-800">{commitmentTypeLabel(commitment.type)}</span>
+                          <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-700">{commitmentStatusLabel(commitment.status)}</span>
+                        </div>
+                        <p className="mt-2 text-sm text-slate-800">{safeStr(commitment.text)}</p>
+                        {safeStr(commitment.responsible) ? <p className="mt-1 text-xs text-slate-500">Responsable : {safeStr(commitment.responsible)}</p> : null}
+                        {safeStr((commitment as UiCallCommitment & { source_member_label?: string }).source_member_label) ? (
+                          <p className="mt-1 text-xs font-medium text-violet-700">
+                            Source : {safeStr((commitment as UiCallCommitment & { source_member_label?: string }).source_member_label)}
+                          </p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {selectedCall.members?.length ? (
+                <section className="rounded-2xl border border-slate-200 p-4">
+                  <h3 className="text-sm font-semibold text-slate-900">Détails des appels</h3>
+                  <div className="mt-3 space-y-3">
+                    {selectedCall.members.map((member, index) => (
+                      <details key={member.inbox_item_id || index} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                        <summary className="cursor-pointer text-sm font-semibold text-slate-800">
+                          Appel {index + 1}
+                          <span className="ml-2 text-xs font-normal text-slate-500">
+                            {formatHumanDate(member.started_at) || "Date inconnue"}
+                            {member.duration_seconds ? ` · ${Math.round(member.duration_seconds / 60)} min` : ""}
+                          </span>
+                        </summary>
+                        <div className="mt-3 space-y-3">
+                          {safeStr(member.summary) ? <p className="text-sm leading-relaxed text-slate-700">{safeStr(member.summary)}</p> : null}
+                          {memberCallChronology(member).length ? (
+                            <div>
+                              <div className="text-xs font-semibold uppercase tracking-wide text-sky-800">Segments sémantiques</div>
+                              <div className="mt-2 space-y-2">
+                                {memberCallChronology(member).map((block, blockIndex) => (
+                                  <div key={safeStr(block.id) || `member-chronology-${index}-${blockIndex}`} className="rounded-lg border border-sky-100 bg-white p-2 text-xs">
+                                    <div className="font-semibold text-sky-800">{safeStr(block.speaker, "Échange")} · {safeStr(block.turn_kind, "mixte")}</div>
+                                    <div className="mt-1 text-slate-700">{safeStr(block.text)}</div>
+                                    {block.pending ? <div className="mt-1 font-medium text-amber-700">Point ouvert</div> : null}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                          {memberCallCommitments(member).length ? (
+                            <div>
+                              <div className="text-xs font-semibold uppercase tracking-wide text-emerald-800">Engagements de cet appel</div>
+                              <div className="mt-2 space-y-2">
+                                {memberCallCommitments(member).map((commitment, commitmentIndex) => (
+                                  <div key={`${safeStr(commitment.text) || "member-commitment"}-${commitmentIndex}`} className="rounded-lg border border-emerald-100 bg-white p-2 text-xs text-slate-700">
+                                    <div className="font-semibold text-emerald-800">{commitmentTypeLabel(commitment.type)} · {commitmentStatusLabel(commitment.status)}</div>
+                                    <div className="mt-1">{safeStr(commitment.text)}</div>
+                                    {safeStr(commitment.responsible) ? <div className="mt-1 text-slate-500">Responsable : {safeStr(commitment.responsible)}</div> : null}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      </details>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              <section className="rounded-2xl border border-slate-200 p-4">
+                <h3 className="text-sm font-semibold text-slate-900">Autres éléments d’analyse</h3>
+                <div className="mt-3 space-y-4 text-sm">
+                  <div>
+                    <span className="text-xs text-slate-500">Nature de l’appel</span>
+                    <p className="font-medium text-slate-800">{selectedCall.nature || safeStr(selectedCall.analysis?.nature) || "Non déterminée"}</p>
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-500">Actions identifiées</span>
+                    {callAnalysisList(selectedCall, "actions").length ? <ul className="mt-1 list-disc space-y-1 pl-5 text-slate-800">{callAnalysisList(selectedCall, "actions").map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p className="mt-1 text-slate-500">Aucune action identifiée.</p>}
+                  </div>
+                  <div>
+                    <span className="text-xs text-slate-500">Incertitudes</span>
+                    {callAnalysisList(selectedCall, "uncertainties").length ? <ul className="mt-1 list-disc space-y-1 pl-5 text-amber-800">{callAnalysisList(selectedCall, "uncertainties").map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p className="mt-1 text-slate-500">Aucune incertitude renseignée.</p>}
+                  </div>
+                </div>
+              </section>
+            </div>
+          </aside>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -1477,7 +1807,9 @@ export default function ChantierDetailPage() {
   const [activeNoteId, setActiveNoteId] = useState<string>("");
   const [expandedNoteIds, setExpandedNoteIds] = useState<Set<string>>(new Set());
 
-  // init: si activeNoteId absent ou invalide, choisir la plus récente, sinon "__draft__"
+  // init: l'éditeur commence toujours sur une nouvelle note vierge.
+  // Les notes existantes restent disponibles dans l'historique et peuvent
+  // être chargées explicitement avec « Réouvrir ».
   useEffect(() => {
     if (!currentSessionRaw) {
       if (activeNoteId) setActiveNoteId("");
@@ -1492,12 +1824,6 @@ export default function ChantierDetailPage() {
 
     if (activeNoteId && uiNotes.some((n) => n.id === activeNoteId)) return;
 
-    if (uiNotes.length > 0) {
-      setActiveNoteId(pickMostRecentNoteId(uiNotes));
-      return;
-    }
-
-    // pas de note => on met un placeholder draft
     setActiveNoteId("__draft__");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionRaw, uiNotes]);
@@ -2343,6 +2669,8 @@ export default function ChantierDetailPage() {
       const receivedAt = get(msg, "received_at", null);
       const lastMessageAt = get(msg, "last_message_at", null);
       const kind = safeStr(get(msg, "kind", ""), "");
+      const callRaw = get(msg, "call", null);
+      const call = callRaw && typeof callRaw === "object" ? (callRaw as UiCallConversation) : null;
 
       const photoCountFromData = Number(get(msg, "photo_count", 0) || 0);
       const attachmentCountFromData = Number(get(msg, "attachment_count", 0) || 0);
@@ -2373,6 +2701,11 @@ export default function ChantierDetailPage() {
           attachmentCountFromData > 0 ? attachmentCountFromData : attachments.length,
         photos,
         attachments,
+        call,
+        callAnalysis:
+          call && call.analysis && typeof call.analysis === "object"
+            ? call.analysis
+            : null,
       };
     });
 
