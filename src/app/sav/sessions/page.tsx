@@ -233,6 +233,13 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
 
   // statut : on prend ce qui existe, sinon fallback A_TRAITER
   const savSessions: any[] = Array.isArray(c?.sav?.sav_sessions) ? c.sav.sav_sessions : [];
+  const savSessionIds = Array.from(
+    new Set(
+      savSessions
+        .map((session) => String(session?.sav_session_id || "").trim())
+        .filter(Boolean),
+    ),
+  );
   const savStatuses = savSessions
     .map((s) => String(s?.status || "").trim().toUpperCase())
     .filter(Boolean);
@@ -287,7 +294,9 @@ function buildRowFromChantierJson(c: ChantierJson): ChantierAggItem {
     sender_numbers: senders,
     report_recipient_number: reportRecipient,
     session_ids: sessionIds,
-    session_count: sessionIds.length,
+    // `links.session_ids` contient les sessions sources des appels. Pour la
+    // colonne « Sessions », on compte les sessions SAV cibles uniques.
+    session_count: Array.isArray(c?.sav?.sav_sessions) ? savSessionIds.length : sessionIds.length,
     photo_count: photosArr.length,
 
     // legacy timestamps kept (not used for sorting “Dernière activité” anymore)
@@ -1167,7 +1176,7 @@ export default function SavSessionsListPage() {
               const isRattachee = Boolean((c.chantier_id || "").trim());
               const nonRattachee = !isRattachee;
 
-              const sidCount = (c.session_ids || []).length || c.session_count || 0;
+              const sidCount = c.session_count ?? new Set(c.session_ids || []).size;
               const photoCount = typeof c.photo_count === "number" ? c.photo_count : 0;
 
               const sig = computeSig(c);
