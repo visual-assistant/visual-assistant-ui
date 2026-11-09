@@ -175,7 +175,17 @@ type DiscoveredCall = {
   } | null;
   processing_status?: string | null;
   suggested_group?: string | null;
+  suggested_chantiers?: SuggestedChantier[] | null;
   [key: string]: unknown;
+};
+
+type SuggestedChantier = {
+  chantier_id: string;
+  chantier_label?: string | null;
+  installateur?: string | null;
+  status?: string | null;
+  session_ids?: string[];
+  match?: string | null;
 };
 
 type CallConversationMember = {
@@ -211,6 +221,21 @@ type GroupSuggestion = {
   max_gap_minutes?: number | null;
   duration_based?: boolean | null;
   confidence?: "high" | "medium" | "low" | string | null;
+  suggested_chantiers?: SuggestedChantier[] | null;
+};
+
+type PreAttachmentChoice = {
+  type: "call" | "group";
+  group_id?: string;
+  discovery_keys?: string[];
+  discovery_key?: string;
+  chantier_id?: string | null;
+  chantier_label?: string | null;
+  sav_session_id?: string | null;
+  session_label?: string | null;
+  create_new_sav_session?: boolean;
+  create_new_chantier?: boolean;
+  status: "attached" | "without";
 };
 
 type DiscoveryJob = {
@@ -231,6 +256,63 @@ type CallProcessJob = DiscoveryJob & {
     analysis?: unknown;
   } | null;
 };
+
+function buildPreAttachmentPayload(
+  selectedKeys: Set<string>,
+  groups: GroupSuggestion[],
+  choices: Record<string, PreAttachmentChoice>,
+) {
+  const payload: Array<Record<string, unknown>> = [];
+  const emittedGroups = new Set<string>();
+  const groupByKey = new Map<string, GroupSuggestion>();
+
+  groups.forEach((group) => {
+    (group.call_fingerprints || []).forEach((key) => groupByKey.set(key, group));
+  });
+
+  Array.from(selectedKeys).forEach((key) => {
+    const choice = choices[key];
+    if (!choice) return;
+
+    if (choice.type === "group" && choice.group_id) {
+      const groupKeys = choice.discovery_keys || groupByKey.get(key)?.call_fingerprints || [];
+      const completeGroupSelected = groupKeys.length > 0 && groupKeys.every((groupKey) => selectedKeys.has(groupKey));
+      if (!completeGroupSelected) {
+        payload.push({
+          type: "call",
+          discovery_key: key,
+          chantier_id: choice.chantier_id ?? null,
+          sav_session_id: choice.sav_session_id ?? null,
+          create_new_sav_session: Boolean(choice.create_new_sav_session),
+        });
+        return;
+      }
+      if (emittedGroups.has(choice.group_id)) return;
+      emittedGroups.add(choice.group_id);
+      payload.push({
+        type: "group",
+        group_id: choice.group_id,
+        discovery_keys: groupKeys,
+        chantier_id: choice.chantier_id ?? null,
+        sav_session_id: choice.sav_session_id ?? null,
+        create_new_sav_session: Boolean(choice.create_new_sav_session),
+        create_new_chantier: Boolean(choice.create_new_chantier),
+      });
+      return;
+    }
+
+    payload.push({
+      type: "call",
+      discovery_key: key,
+      chantier_id: choice.chantier_id ?? null,
+      sav_session_id: choice.sav_session_id ?? null,
+      create_new_sav_session: Boolean(choice.create_new_sav_session),
+      create_new_chantier: Boolean(choice.create_new_chantier),
+    });
+  });
+
+  return payload;
+}
 
 type InboxOverviewColumn = {
   key: "SAV_RELEVANT" | "OUT_OF_SCOPE" | string;
@@ -928,6 +1010,7 @@ export default function InboxSavPage() {
   const [discoveryJob, setDiscoveryJob] = useState<DiscoveryJob | null>(null);
   const [processJob, setProcessJob] = useState<CallProcessJob | null>(null);
   const [selectedDiscoveryKeys, setSelectedDiscoveryKeys] = useState<Set<string>>(new Set());
+  const [preAttachments, setPreAttachments] = useState<Record<string, PreAttachmentChoice>>({});
   const [processError, setProcessError] = useState<string | null>(null);
   const [discoveryOpen, setDiscoveryOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1337,7 +1420,10 @@ export default function InboxSavPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
-        body: JSON.stringify({ discovery_keys: discoveryKeys }),
+         body: JSON.stringify({
+           discovery_keys: discoveryKeys,
+           attachments: buildPreAttachmentPayload(selectedDiscoveryKeys, groupSuggestions, preAttachments),
+         }),
       });
       if (!res.ok) throw new Error("call processing unavailable");
       const job = (await res.json()) as CallProcessJob;
@@ -2241,6 +2327,8 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
           totalHistoryCount={discoveredTotalCount}
           selectedKeys={selectedDiscoveryKeys}
           onSelectedKeysChange={setSelectedDiscoveryKeys}
+          preAttachments={preAttachments}
+          onPreAttachmentsChange={setPreAttachments}
           processJob={processJob}
           processError={processError}
           onProcess={() => void processSelectedCalls()}
@@ -3485,6 +3573,151 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
   );
 }
 
+function preAttachmentContext(type: "call" | "group", keys: string[], calls: DiscoveredCall[]) {
+  const matchedCalls = keys
+    .map((key) => calls.find((call) => call.discovery_key === key))
+    .filter((call): call is DiscoveredCall => Boolean(call));
+  const first = matchedCalls[0];
+  const phone = first?.phone_labels?.[0] || "Numéro inconnu";
+  const dates = matchedCalls.map((call) => call.date_label || formatDiscoveryDate(call.started_at)).filter(Boolean);
+  const crm = safeStr(first?.crm?.matches?.[0]?.name);
+  const collaborator = first ? discoveredCollaborator(first) : "Collaborateur non identifié";
+
+  if (type === "group") {
+    return {
+      contextTitle: `Groupe de ${matchedCalls.length || keys.length} appel${(matchedCalls.length || keys.length) > 1 ? "s" : ""} · ${phone}`,
+      contextDetails: `${dates.join(" et ")} · ${crm || collaborator}`,
+    };
+  }
+
+  return {
+    contextTitle: `Appel individuel · ${dates[0] || "Date inconnue"}`,
+    contextDetails: `${phone} · ${crm || collaborator}`,
+  };
+}
+
+function PreAttachmentEditor({
+  target,
+  onSave,
+  onClose,
+}: {
+  target: { type: "call" | "group"; id: string; keys: string[]; suggestions: SuggestedChantier[]; contextTitle: string; contextDetails: string };
+  onSave: (choice: PreAttachmentChoice) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<AttachChantierResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [selected, setSelected] = useState<SuggestedChantier | null>(null);
+  const [sessions, setSessions] = useState<SavSessionLite[]>([]);
+  const [sessionId, setSessionId] = useState("");
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [mode, setMode] = useState<"attached" | "without" | "new">("attached");
+  const [newChantierId, setNewChantierId] = useState("");
+
+  const loadChantier = async (chantier: SuggestedChantier) => {
+    setSelected(chantier);
+    setMode("attached");
+    setNewChantierId("");
+    setSessionLoading(true);
+    try {
+      const res = await fetch(buildUrl(`/chantiers/${encodeURIComponent(chantier.chantier_id)}`), { cache: "no-store" });
+      const data = res.ok ? await res.json() : null;
+      const raw = Array.isArray(data?.sav?.sav_sessions) ? data.sav.sav_sessions : [];
+      const mapped = raw
+        .filter((item: any) => item && item.sav_session_id)
+        .map((item: any) => ({
+          sav_session_id: String(item.sav_session_id),
+          title: item.title ?? null,
+          created_at: typeof item.created_at === "number" ? item.created_at : null,
+          updated_at: typeof item.updated_at === "number" ? item.updated_at : null,
+          status: item.status ?? null,
+        })) as SavSessionLite[];
+      setSessions(mapped);
+      setSessionId("");
+    } catch {
+      setSessions([]);
+      setSessionId("");
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  const search = async () => {
+    const normalized = normalizeSearchStr(query.trim());
+    if (!normalized) return;
+    setSearching(true);
+    try {
+      const res = await fetch(buildUrl("/sav/overview"), { cache: "no-store" });
+      const data = (await res.json()) as SavOverviewResponse;
+      const rows = (Array.isArray(data.chantiers) ? data.chantiers : [])
+        .map(buildAttachChantierResultFromJson)
+        .filter((item): item is AttachChantierResult => Boolean(item));
+      const filtered = rows.filter((row) => normalizeSearchStr([
+        row.chantier_id, row.chantier_label, row.installateur, row.owner, ...(row.session_ids || []),
+      ].filter(Boolean).join(" ")).includes(normalized));
+      setResults(filtered.slice(0, 12));
+    } catch {
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const save = () => {
+    if (mode === "new") {
+      const chantierId = newChantierId.trim();
+      if (!chantierId) return;
+      onSave({ type: target.type, ...(target.type === "group" ? { group_id: target.id, discovery_keys: target.keys } : { discovery_key: target.id }), status: "attached", chantier_id: chantierId, chantier_label: chantierId, sav_session_id: null, session_label: "Nouvelle session SAV", create_new_sav_session: true, create_new_chantier: true });
+      return;
+    }
+    if (mode === "without") {
+      onSave({ type: target.type, ...(target.type === "group" ? { group_id: target.id, discovery_keys: target.keys } : { discovery_key: target.id }), status: "without", chantier_id: null, sav_session_id: null, create_new_sav_session: false });
+      return;
+    }
+    if (!selected) return;
+    const session = sessions.find((item) => item.sav_session_id === sessionId);
+    onSave({ type: target.type, ...(target.type === "group" ? { group_id: target.id, discovery_keys: target.keys } : { discovery_key: target.id }), status: "attached", chantier_id: selected.chantier_id, chantier_label: selected.chantier_label, sav_session_id: sessionId || null, session_label: session?.title || (sessionId ? sessionId : "Nouvelle session SAV"), create_new_sav_session: !sessionId });
+  };
+
+  return (
+    <div className="border-b border-sky-200 bg-sky-50/70 px-5 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">Préparer le rattachement {target.type === "group" ? "du groupe" : "de l’appel"}</p>
+          <div className="mt-2 rounded-lg border border-sky-200 bg-white/80 px-3 py-2 text-xs text-slate-700">
+            <p className="font-semibold text-slate-900">{target.contextTitle}</p>
+            <p className="mt-0.5">{target.contextDetails}</p>
+            {target.type === "group" ? <p className="mt-1 text-slate-500">Le choix sera appliqué à tous les appels du groupe.</p> : null}
+          </div>
+        </div>
+        <button type="button" onClick={onClose} className="text-xs font-semibold text-slate-500 hover:text-slate-800">Fermer</button>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {target.suggestions.map((suggestion) => (
+          <button key={suggestion.chantier_id} type="button" onClick={() => void loadChantier(suggestion)} className={`rounded-lg border px-3 py-2 text-left text-xs ${selected?.chantier_id === suggestion.chantier_id ? "border-sky-400 bg-white" : "border-sky-200 bg-white/70 hover:bg-white"}`}>
+            <span className="block font-semibold text-slate-800">{suggestion.chantier_label || suggestion.chantier_id}</span>
+            <span className="block text-slate-500">Suggéré par le numéro de téléphone</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void search(); }} placeholder="Référence, installateur ou session" className="h-9 min-w-[260px] flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm" />
+        <button type="button" onClick={() => void search()} disabled={searching} className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-50">{searching ? "Recherche…" : "Chercher"}</button>
+      </div>
+      {results.length ? <div className="mt-2 grid gap-2 sm:grid-cols-2">{results.map((result) => <button key={result.chantier_id} type="button" onClick={() => void loadChantier({ chantier_id: result.chantier_id, chantier_label: result.chantier_label, installateur: result.installateur, status: result.status, session_ids: result.session_ids })} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-left text-xs hover:border-sky-300"><span className="font-semibold text-slate-800">{result.chantier_label || result.chantier_id}</span><span className="block text-slate-500">{result.installateur || "Installateur non renseigné"}</span></button>)}</div> : null}
+
+      {selected ? <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3"><div className="text-sm font-semibold text-slate-900">{selected.chantier_label || selected.chantier_id}</div><div className="mt-2 flex flex-wrap gap-3 text-xs"><label className="inline-flex items-center gap-2"><input type="radio" checked={!sessionId} onChange={() => setSessionId("")} /> Nouvelle session SAV</label><label className="inline-flex items-center gap-2"><input type="radio" checked={Boolean(sessionId)} onChange={() => setSessionId(sessions[0]?.sav_session_id || "")} disabled={!sessions.length || sessionLoading} /> Session existante</label></div>{sessionId ? <select value={sessionId} onChange={(event) => setSessionId(event.target.value)} className="mt-2 h-9 w-full rounded-lg border border-slate-300 bg-white px-2 text-sm">{sessions.map((session) => <option key={session.sav_session_id} value={session.sav_session_id}>{session.title || session.sav_session_id}</option>)}</select> : null}</div> : null}
+
+      {mode === "new" ? <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3"><label className="block text-xs font-semibold text-amber-900" htmlFor={`new-chantier-${target.id}`}>Référence du nouveau chantier</label><input id={`new-chantier-${target.id}`} value={newChantierId} onChange={(event) => setNewChantierId(event.target.value)} placeholder="Ex. CH-2026-0042" className="mt-2 h-9 w-full rounded-lg border border-amber-300 bg-white px-3 text-sm" /><p className="mt-1 text-xs text-amber-800">Une session SAV initiale sera créée automatiquement lors du traitement.</p></div> : null}
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap gap-3"><button type="button" onClick={() => setMode(mode === "without" ? "attached" : "without")} className={`text-xs font-semibold ${mode === "without" ? "text-amber-700" : "text-slate-500 hover:text-slate-800"}`}>{mode === "without" ? "Choisir un chantier" : "Laisser sans chantier"}</button><button type="button" onClick={() => { setMode(mode === "new" ? "attached" : "new"); setSelected(null); setSessionId(""); }} className={`text-xs font-semibold ${mode === "new" ? "text-amber-700" : "text-slate-500 hover:text-slate-800"}`}>{mode === "new" ? "Choisir un chantier existant" : "Créer un nouveau chantier"}</button></div><button type="button" onClick={save} disabled={(mode === "attached" && !selected) || (mode === "new" && !newChantierId.trim())} className="rounded-lg bg-sky-700 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50">Enregistrer le choix</button></div>
+    </div>
+  );
+}
+
 function CallDiscoveryPanel({
   open,
   onOpenChange,
@@ -3500,6 +3733,8 @@ function CallDiscoveryPanel({
   onRefresh,
   selectedKeys,
   onSelectedKeysChange,
+  preAttachments,
+  onPreAttachmentsChange,
   processJob,
   processError,
   onProcess,
@@ -3518,6 +3753,8 @@ function CallDiscoveryPanel({
   onRefresh: () => void;
   selectedKeys: Set<string>;
   onSelectedKeysChange: React.Dispatch<React.SetStateAction<Set<string>>>;
+  preAttachments: Record<string, PreAttachmentChoice>;
+  onPreAttachmentsChange: React.Dispatch<React.SetStateAction<Record<string, PreAttachmentChoice>>>;
   processJob: CallProcessJob | null;
   processError: string | null;
   onProcess: () => void;
@@ -3537,6 +3774,14 @@ function CallDiscoveryPanel({
   const processStatus = safeStr(processJob?.status).toLowerCase();
   const discoveryBusy = discoveryStatus === "queued" || discoveryStatus === "running";
   const processBusy = processStatus === "queued" || processStatus === "running";
+  const [attachmentEditor, setAttachmentEditor] = useState<{
+    type: "call" | "group";
+    id: string;
+    keys: string[];
+    suggestions: SuggestedChantier[];
+    contextTitle: string;
+    contextDetails: string;
+  } | null>(null);
   const allSelected = calls.length > 0 && calls.every((call) => selectedKeys.has(call.discovery_key));
   const total = processJob?.total_count || 0;
   const completed = processJob?.completed_count ?? processJob?.processed_count ?? 0;
@@ -3726,6 +3971,7 @@ function CallDiscoveryPanel({
           <div className="mt-2 flex snap-x gap-2 overflow-x-auto pb-1">
             {groups.map((group) => {
               const selected = group.call_fingerprints.length > 0 && group.call_fingerprints.every((key) => selectedKeys.has(key));
+              const groupChoice = preAttachments[group.call_fingerprints[0]];
               const crm = group.crm;
               const crmMatches = Array.isArray(crm?.matches) ? crm.matches : [];
               const crmStatus = safeStr(crm?.status).toLowerCase();
@@ -3749,20 +3995,18 @@ function CallDiscoveryPanel({
                       {group.max_gap_minutes !== null && group.max_gap_minutes !== undefined ? ` · ${group.max_gap_minutes} min max` : ""}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(group)}
-                    aria-label={selected ? `Désélectionner le groupe ${group.group_id}` : `Sélectionner le groupe ${group.group_id}`}
-                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-sm font-bold ${selected ? "border-violet-300 bg-violet-100 text-violet-800" : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"}`}
-                  >
-                    {selected ? "✓" : "+"}
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <button type="button" onClick={() => setAttachmentEditor({ type: "group", id: group.group_id, keys: group.call_fingerprints, suggestions: group.suggested_chantiers || [], ...preAttachmentContext("group", group.call_fingerprints, calls) })} className="rounded-lg border border-sky-200 bg-white px-2 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-50">{groupChoice ? "Modifier" : "Rattacher"}</button>
+                    <button type="button" onClick={() => toggleGroup(group)} aria-label={selected ? `Désélectionner le groupe ${group.group_id}` : `Sélectionner le groupe ${group.group_id}`} className={`flex h-8 w-8 items-center justify-center rounded-lg border text-sm font-bold ${selected ? "border-violet-300 bg-violet-100 text-violet-800" : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"}`}>{selected ? "✓" : "+"}</button>
+                  </div>
                 </div>
               );
             })}
           </div>
         </div>
       ) : null}
+
+      {attachmentEditor ? <PreAttachmentEditor target={attachmentEditor} onClose={() => setAttachmentEditor(null)} onSave={(choice) => { onPreAttachmentsChange((current) => { const next = { ...current }; attachmentEditor.keys.forEach((key) => { next[key] = choice; }); return next; }); setAttachmentEditor(null); }} /> : null}
 
       <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-5 py-3 text-sm">
         <label className="inline-flex items-center gap-2 font-medium text-slate-700">
@@ -3789,6 +4033,7 @@ function CallDiscoveryPanel({
                 <th className="px-4 py-3">Téléphone</th>
                 <th className="px-4 py-3">Contact CRM</th>
                 <th className="px-4 py-3">Société / email</th>
+                <th className="px-4 py-3">Pré-rattachement</th>
                 <th className="px-4 py-3">Statut CRM</th>
                 <th className="px-4 py-3">Statut</th>
               </tr>
@@ -3797,6 +4042,7 @@ function CallDiscoveryPanel({
               {calls.map((call) => {
                 const match = call.crm?.matches?.[0] || {};
                 const multiple = (call.crm?.matches?.length || 0) > 1;
+                const attachment = preAttachments[call.discovery_key];
                 return (
                   <tr key={call.discovery_key} className={selectedKeys.has(call.discovery_key) ? "bg-sky-50" : "hover:bg-slate-50"}>
                     <td className="px-5 py-3 align-top">
@@ -3813,12 +4059,15 @@ function CallDiscoveryPanel({
                       <div>{safeStr(match.company) || "—"}</div>
                       <div className="text-xs">{safeStr(match.email) || "—"}</div>
                     </td>
-                    <td className="px-4 py-3 align-top">
-                      <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
-                        {crmStatusLabel(call.crm?.status)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 align-top"><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">{discoveredStatusLabel(call.processing_status)}</span></td>
+                     <td className="min-w-[190px] px-4 py-3 align-top">
+                       {attachment ? <><span className={`rounded-full px-2 py-1 text-xs font-medium ${attachment.status === "without" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"}`}>{attachment.status === "without" ? "Sans chantier" : attachment.chantier_label || attachment.chantier_id}</span><span className="mt-1 block text-xs text-slate-500">{attachment.status === "attached" ? (attachment.session_label || "Nouvelle session SAV") : "Traitement sans rattachement"}</span><button type="button" onClick={() => { const group = groups.find((item) => item.group_id === attachment.group_id); const keys = attachment.type === "group" ? attachment.discovery_keys || group?.call_fingerprints || [call.discovery_key] : [call.discovery_key]; setAttachmentEditor({ type: attachment.type, id: attachment.type === "group" ? attachment.group_id || "" : call.discovery_key, keys, suggestions: attachment.type === "group" ? group?.suggested_chantiers || [] : call.suggested_chantiers || [], ...preAttachmentContext(attachment.type, keys, calls) }); }} className="mt-1 text-xs font-semibold text-sky-700">Modifier</button></> : <button type="button" onClick={() => { const group = groups.find((item) => item.call_fingerprints.includes(call.discovery_key)); if (group) { setAttachmentEditor({ type: "group", id: group.group_id, keys: group.call_fingerprints, suggestions: group.suggested_chantiers || [], ...preAttachmentContext("group", group.call_fingerprints, calls) }); } else { setAttachmentEditor({ type: "call", id: call.discovery_key, keys: [call.discovery_key], suggestions: call.suggested_chantiers || [], ...preAttachmentContext("call", [call.discovery_key], calls) }); } }} className="text-xs font-semibold text-sky-700 hover:text-sky-900">Rattacher</button>}
+                     </td>
+                     <td className="px-4 py-3 align-top">
+                       <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+                         {crmStatusLabel(call.crm?.status)}
+                       </span>
+                     </td>
+                     <td className="px-4 py-3 align-top"><span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">{discoveredStatusLabel(call.processing_status)}</span></td>
                   </tr>
                 );
               })}
