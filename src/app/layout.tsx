@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Script from "next/script"; // 👈 AJOUT
 import "./globals.css";
+import { CallProcessingProvider } from "../components/CallProcessingProvider";
 
 export const metadata: Metadata = {
   title: "Visual Assistant",
@@ -63,7 +64,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
 
       <body className="bg-slate-50 text-slate-950 antialiased">
-        {children}
+        <CallProcessingProvider>{children}</CallProcessingProvider>
       </body>
     </html>
   );
