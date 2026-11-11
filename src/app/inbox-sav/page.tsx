@@ -3,7 +3,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import AppShell from "../../components/AppShell";
-import { ChevronDown, ChevronUp, Loader2, Phone } from "lucide-react";
+import { ChevronDown, ChevronUp, Phone } from "lucide-react";
+import { useCallProcessing } from "../../components/CallProcessingProvider";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_INTERNAL_API || "http://localhost:8001";
@@ -242,19 +243,6 @@ type DiscoveryJob = {
   job_id?: string | null;
   status?: string | null;
   stage?: string | null;
-};
-
-type CallProcessJob = DiscoveryJob & {
-  total_count?: number | null;
-  processed_count?: number | null;
-  failed_count?: number | null;
-  completed_count?: number | null;
-  result?: {
-    crawler?: unknown;
-    import?: unknown;
-    transcription?: unknown;
-    analysis?: unknown;
-  } | null;
 };
 
 function buildPreAttachmentPayload(
@@ -984,6 +972,7 @@ function ColumnSection({
 }
 
 export default function InboxSavPage() {
+  const { job: callProcessingJob, startCallProcessing } = useCallProcessing();
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1008,7 +997,6 @@ export default function InboxSavPage() {
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [lookbackMinutes, setLookbackMinutes] = useState("60");
   const [discoveryJob, setDiscoveryJob] = useState<DiscoveryJob | null>(null);
-  const [processJob, setProcessJob] = useState<CallProcessJob | null>(null);
   const [selectedDiscoveryKeys, setSelectedDiscoveryKeys] = useState<Set<string>>(new Set());
   const [preAttachments, setPreAttachments] = useState<Record<string, PreAttachmentChoice>>({});
   const [processError, setProcessError] = useState<string | null>(null);
@@ -1384,57 +1372,28 @@ export default function InboxSavPage() {
     }
   };
 
-  const pollCallProcess = useCallback(async (jobId: string): Promise<void> => {
-    try {
-      const res = await fetch(buildUrl(`/inbox/calls/process/${encodeURIComponent(jobId)}`), {
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error("process status unavailable");
-      const job = (await res.json()) as CallProcessJob;
-      setProcessJob({ ...job, job_id: job.job_id || jobId });
-      const status = safeStr(job.status).toLowerCase();
-
-      if (status === "completed") {
-        setSelectedDiscoveryKeys(new Set());
-        await Promise.all([fetchDiscoveredCalls(lookbackMinutes, true), fetchOverview({ silent: true })]);
-        return;
-      }
-      if (status === "failed") {
-        setProcessError("Le traitement des appels a échoué.");
-        await fetchDiscoveredCalls(lookbackMinutes, true);
-        return;
-      }
-      window.setTimeout(() => void pollCallProcess(jobId), 1500);
-    } catch (e) {
-      console.error("poll call process error", e);
-      setProcessError("Impossible de suivre le traitement des appels.");
-    }
-  }, [fetchDiscoveredCalls, fetchOverview, lookbackMinutes]);
-
   const processSelectedCalls = async () => {
     const discoveryKeys = Array.from(selectedDiscoveryKeys);
     if (!discoveryKeys.length) return;
     setProcessError(null);
     try {
-      const res = await fetch(buildUrl("/inbox/calls/process"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        cache: "no-store",
-         body: JSON.stringify({
-           discovery_keys: discoveryKeys,
-           attachments: buildPreAttachmentPayload(selectedDiscoveryKeys, groupSuggestions, preAttachments),
-         }),
+      await startCallProcessing({
+        discovery_keys: discoveryKeys,
+        attachments: buildPreAttachmentPayload(selectedDiscoveryKeys, groupSuggestions, preAttachments),
       });
-      if (!res.ok) throw new Error("call processing unavailable");
-      const job = (await res.json()) as CallProcessJob;
-      setProcessJob(job);
-      const jobId = safeStr(job.job_id);
-      if (jobId) await pollCallProcess(jobId);
+      setSelectedDiscoveryKeys(new Set());
+      setDiscoveryOpen(false);
     } catch (e) {
       console.error("process selected calls error", e);
-      setProcessError("Le traitement des appels n’a pas pu démarrer.");
+      setProcessError(e instanceof Error ? e.message : "Le traitement des appels n’a pas pu démarrer.");
     }
   };
+
+  useEffect(() => {
+    const status = safeStr(callProcessingJob?.status).toLowerCase();
+    if (status !== "completed" && status !== "completed_with_errors" && status !== "failed") return;
+    void Promise.all([fetchDiscoveredCalls(lookbackMinutes, true), fetchOverview({ silent: true })]);
+  }, [callProcessingJob?.status, fetchDiscoveredCalls, fetchOverview, lookbackMinutes]);
 
   useEffect(() => {
     void fetchDiscoveredCalls("60");
@@ -2329,7 +2288,7 @@ const saveReviewPanelSilent = async (): Promise<boolean> => {
           onSelectedKeysChange={setSelectedDiscoveryKeys}
           preAttachments={preAttachments}
           onPreAttachmentsChange={setPreAttachments}
-          processJob={processJob}
+          processBusy={callProcessingJob?.status === "queued" || callProcessingJob?.status === "running"}
           processError={processError}
           onProcess={() => void processSelectedCalls()}
         />
@@ -3735,7 +3694,7 @@ function CallDiscoveryPanel({
   onSelectedKeysChange,
   preAttachments,
   onPreAttachmentsChange,
-  processJob,
+  processBusy,
   processError,
   onProcess,
 }: {
@@ -3755,7 +3714,7 @@ function CallDiscoveryPanel({
   onSelectedKeysChange: React.Dispatch<React.SetStateAction<Set<string>>>;
   preAttachments: Record<string, PreAttachmentChoice>;
   onPreAttachmentsChange: React.Dispatch<React.SetStateAction<Record<string, PreAttachmentChoice>>>;
-  processJob: CallProcessJob | null;
+  processBusy: boolean;
   processError: string | null;
   onProcess: () => void;
 }) {
@@ -3771,9 +3730,7 @@ function CallDiscoveryPanel({
   }, [open]);
 
   const discoveryStatus = safeStr(discoveryJob?.status).toLowerCase();
-  const processStatus = safeStr(processJob?.status).toLowerCase();
   const discoveryBusy = discoveryStatus === "queued" || discoveryStatus === "running";
-  const processBusy = processStatus === "queued" || processStatus === "running";
   const [attachmentEditor, setAttachmentEditor] = useState<{
     type: "call" | "group";
     id: string;
@@ -3783,11 +3740,6 @@ function CallDiscoveryPanel({
     contextDetails: string;
   } | null>(null);
   const allSelected = calls.length > 0 && calls.every((call) => selectedKeys.has(call.discovery_key));
-  const total = processJob?.total_count || 0;
-  const completed = processJob?.completed_count ?? processJob?.processed_count ?? 0;
-  const failed = processJob?.failed_count ?? 0;
-  const progress = total > 0 ? Math.min(100, Math.round(((completed + failed) / total) * 100)) : null;
-
   const toggleKey = (key: string) => {
     onSelectedKeysChange((current) => {
       const next = new Set(current);
@@ -3931,31 +3883,6 @@ function CallDiscoveryPanel({
 
       {error ? <div className="border-b border-rose-200 bg-rose-50 px-5 py-3 text-sm text-rose-700">{error}</div> : null}
       {processError ? <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-800">{processError}</div> : null}
-
-      {processJob && processBusy ? (
-        <div className="border-b border-violet-200 bg-violet-50 px-5 py-4 text-sm text-violet-900">
-          <div className="flex items-center justify-between gap-3">
-            <span className="inline-flex items-center gap-2 font-medium">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {callProcessStageLabel(processJob.stage)}
-            </span>
-            <span>{total > 0 ? `${completed + failed}/${total}` : "Progression en cours"}</span>
-          </div>
-          <div className="mt-3 h-2 overflow-hidden rounded-full bg-violet-200">
-            <div
-              className={progress === null ? "h-full w-1/3 animate-pulse rounded-full bg-violet-700" : "h-full rounded-full bg-violet-700 transition-all"}
-              style={progress === null ? undefined : { width: `${progress}%` }}
-            />
-          </div>
-        </div>
-      ) : null}
-
-      {processJob && processStatus === "completed" ? (
-        <div className="border-b border-emerald-200 bg-emerald-50 px-5 py-3 text-sm text-emerald-800">
-          Traitement terminé : {processJob.completed_count ?? processJob.processed_count ?? 0} appel(s) traité(s)
-          {processJob.failed_count ? `, ${processJob.failed_count} échec(s)` : ""}.
-        </div>
-      ) : null}
 
       {groups.length ? (
         <div className="border-b border-violet-200 bg-violet-50/50 px-5 py-3">
@@ -4118,15 +4045,6 @@ function crmStatusLabel(status?: string | null) {
   if (normalized === "unmatched") return "Non trouvé";
   if (normalized === "multiple") return "Plusieurs correspondances";
   return status || "Non vérifié";
-}
-
-function callProcessStageLabel(stage?: string | null) {
-  const normalized = safeStr(stage).toLowerCase();
-  if (normalized === "downloading") return "Téléchargement des appels…";
-  if (normalized === "importing") return "Import des appels…";
-  if (normalized === "transcribing") return "Transcription des appels…";
-  if (normalized === "analyzing") return "Analyse des appels…";
-  return "Traitement des appels…";
 }
 
 function callMemberCount(call: CallConversation) {
